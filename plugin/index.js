@@ -163,14 +163,26 @@ async function sendTelemetryToCrew(app, settings, deliverTelemetry) {
 }
 
 /**
- * Default Signal K connectivity path whose value changes trigger an immediate,
- * manual re-announce of every destination, so clients rediscover the boat the
- * moment its internet connectivity changes (e.g. the Starlink link dropping)
- * instead of waiting up to the re-announce interval. The first/easiest of
- * several providers — operators add more (LTE modem, …) via the `announce`
- * config group's `connectivity_paths`.
+ * Default Signal K connectivity paths whose value changes trigger an
+ * immediate, manual re-announce of every destination, so clients rediscover
+ * the boat the moment its internet connectivity changes (e.g. the Starlink
+ * link dropping or an LTE modem roaming to a new operator) instead of waiting
+ * up to the re-announce interval. These are the common/easy providers; the
+ * operator can add more via the `announce` config group's
+ * `connectivity_paths`.
+ *
+ * Subscribing to a path that the server never publishes is harmless (the
+ * trigger simply never fires for it), so the defaults are safe to leave on
+ * even on boats without that particular connectivity source.
  */
-const DEFAULT_CONNECTIVITY_PATH = "network.providers.starlink.status";
+const DEFAULT_CONNECTIVITY_PATHS = [
+  // Starlink provider status (e.g. "online"/"offline"), supplied by the
+  // signalk-starlink plugin.
+  "network.providers.starlink.status",
+  // LTE operator name (e.g. "Elisa", "Telia"), which changes on a roam or
+  // (de)registration. Supplied by an LTE modem source.
+  "networking.lte.registerNetworkDisplay",
+];
 
 /**
  * Normalises a connectivity-path delta value into a stable comparable string
@@ -200,17 +212,17 @@ function normalizeConnectivityValue(value) {
  * Resolves the configured connectivity-change trigger paths into a unique
  * list of non-empty, trimmed Signal K paths.
  *
- * An absent/non-array value falls back to the single default (Starlink), so
- * the trigger works out of the box on a fresh install. An explicit empty
- * array is honoured as "disabled" (the operator cleared the list), matching
- * how the other config arrays behave.
+ * An absent/non-array value falls back to the default providers (Starlink
+ * and LTE), so the trigger works out of the box on a fresh install. An
+ * explicit empty array is honoured as "disabled" (the operator cleared the
+ * list), matching how the other config arrays behave.
  *
  * @param {unknown} raw
  * @returns {string[]}
  */
 function effectiveConnectivityPaths(raw) {
   if (!Array.isArray(raw)) {
-    return [DEFAULT_CONNECTIVITY_PATH];
+    return DEFAULT_CONNECTIVITY_PATHS.slice();
   }
   const seen = new Set();
   const result = [];
@@ -848,6 +860,6 @@ module.exports.buildSnapshot = buildSnapshot;
 module.exports.sendTelemetryToCrew = sendTelemetryToCrew;
 // Exposed for tests so the connectivity-trigger path/value helpers can be
 // exercised in isolation.
-module.exports.DEFAULT_CONNECTIVITY_PATH = DEFAULT_CONNECTIVITY_PATH;
+module.exports.DEFAULT_CONNECTIVITY_PATHS = DEFAULT_CONNECTIVITY_PATHS;
 module.exports.normalizeConnectivityValue = normalizeConnectivityValue;
 module.exports.effectiveConnectivityPaths = effectiveConnectivityPaths;

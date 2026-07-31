@@ -664,7 +664,7 @@ test("start falls back to a one-shot announce when the interval is 0", async () 
   assert.equal(plugin.lxmf.startAnnouncingCalls.length, 0);
 });
 
-test("a connectivity-change on the default Starlink path re-announces both destinations", async () => {
+test("the default connectivity paths (Starlink and LTE) re-announce both destinations on change", async () => {
   const app = makeApp();
   const plugin = makePlugin(app);
   FakeLxmRouter.instances.length = 0;
@@ -675,16 +675,22 @@ test("a connectivity-change on the default Starlink path re-announces both desti
     nomadnet: { enabled: true },
   });
 
-  const subs = app.subscriptionmanager.subscriptions;
-  assert.ok(
-    subs.some(
-      (s) =>
-        s.context === "vessels.self" &&
-        s.subscribe.some(
-          (sub) => sub.path === "network.providers.starlink.status",
-        ),
-    ),
-    "subscribed to the default connectivity path",
+  // One connectivity subscription watches both default paths.
+  const connSub = app.subscriptionmanager.subscriptions.find(
+    (s) =>
+      s.context === "vessels.self" &&
+      s.subscribe.some(
+        (sub) => sub.path === "network.providers.starlink.status",
+      ),
+  );
+  assert.ok(connSub, "subscribed to the default connectivity paths");
+  assert.deepEqual(
+    connSub.subscribe.map((s) => s.path),
+    [
+      "network.providers.starlink.status",
+      "networking.lte.registerNetworkDisplay",
+    ],
+    "both default providers are watched in a single subscription",
   );
 
   const lxmf = plugin.lxmf;
@@ -772,21 +778,29 @@ test("configured connectivity paths replace the default and any of them fires", 
     messaging: { display_name: "My Boat" },
     announce: {
       connectivity_paths: [
-        "network.providers.starlink.status",
-        "network.providers.lte.status",
+        "networking.lte.registerNetworkDisplay",
+        "communication.cellular.carrier",
       ],
     },
   });
 
   const subs = app.subscriptionmanager.subscriptions;
   const watched = subs.find((s) =>
-    s.subscribe.some((sub) => sub.path === "network.providers.lte.status"),
+    s.subscribe.some((sub) => sub.path === "communication.cellular.carrier"),
   );
   assert.ok(watched, "both configured paths are watched");
   assert.equal(
     watched.subscribe.length,
     2,
     "both paths share one subscription",
+  );
+  assert.ok(
+    !subs.some((s) =>
+      s.subscribe.some(
+        (sub) => sub.path === "network.providers.starlink.status",
+      ),
+    ),
+    "the default paths are not watched when paths are configured",
   );
 
   const lxmf = plugin.lxmf;
@@ -795,7 +809,7 @@ test("configured connectivity paths replace the default and any of them fires", 
   app._onDelta({
     updates: [
       {
-        values: [{ path: "network.providers.lte.status", value: "connected" }],
+        values: [{ path: "communication.cellular.carrier", value: "Elisa" }],
       },
     ],
   });

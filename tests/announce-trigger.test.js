@@ -117,16 +117,17 @@ test("triggerAnnounce tolerates a NomadNet destination without an announce metho
 
 // --- connectivity path/value helpers --------------------------------------
 
-test("effectiveConnectivityPaths defaults to the Starlink path when unset", () => {
-  assert.deepEqual(makePlugin.effectiveConnectivityPaths(undefined), [
+test("effectiveConnectivityPaths defaults to Starlink and LTE when unset", () => {
+  const expected = [
     "network.providers.starlink.status",
-  ]);
-  assert.deepEqual(makePlugin.effectiveConnectivityPaths(null), [
-    "network.providers.starlink.status",
-  ]);
-  assert.deepEqual(makePlugin.effectiveConnectivityPaths("not-an-array"), [
-    "network.providers.starlink.status",
-  ]);
+    "networking.lte.registerNetworkDisplay",
+  ];
+  assert.deepEqual(makePlugin.effectiveConnectivityPaths(undefined), expected);
+  assert.deepEqual(makePlugin.effectiveConnectivityPaths(null), expected);
+  assert.deepEqual(
+    makePlugin.effectiveConnectivityPaths("not-an-array"),
+    expected,
+  );
 });
 
 test("effectiveConnectivityPaths honours an explicit empty list as disabled", () => {
@@ -138,11 +139,14 @@ test("effectiveConnectivityPaths trims, drops blanks and de-dupes", () => {
     makePlugin.effectiveConnectivityPaths([
       "network.providers.starlink.status ",
       "  ",
-      "network.providers.lte.status",
+      "networking.lte.registerNetworkDisplay",
       "network.providers.starlink.status",
       123,
     ]),
-    ["network.providers.starlink.status", "network.providers.lte.status"],
+    [
+      "network.providers.starlink.status",
+      "networking.lte.registerNetworkDisplay",
+    ],
   );
 });
 
@@ -161,9 +165,9 @@ test("normalizeConnectivityValue unwraps {value} deltas and stringifies", () => 
   );
 });
 
-test("the default connectivity path is the Starlink provider status", () => {
-  assert.equal(
-    makePlugin.DEFAULT_CONNECTIVITY_PATH,
+test("the default connectivity paths are Starlink and LTE", () => {
+  assert.deepEqual(makePlugin.DEFAULT_CONNECTIVITY_PATHS, [
     "network.providers.starlink.status",
-  );
+    "networking.lte.registerNetworkDisplay",
+  ]);
 });

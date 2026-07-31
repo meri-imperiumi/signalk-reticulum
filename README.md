@@ -53,7 +53,7 @@ The **Re-announce interval (minutes)** setting (under **Re-announces**) controls
 
 Beyond the periodic cadence, the node re-announces its destinations the moment a connectivity indicator changes, so clients switch over to a still-working mesh path without waiting for the next interval. The boat's *internet* connectivity (Starlink, an LTE modem, …) may come and go, but the Reticulum mesh paths (radio, serial, LAN peering) are unaffected — a fresh announce lets clients discover and use them right away.
 
-The **Connectivity-change trigger paths** list (under **Re-announces**) holds the Signal K paths to watch for value changes. It defaults to the Starlink provider status path (`network.providers.starlink.status`, supplied by the `signalk-starlink` plugin) and supports multiple providers — add your LTE modem's status path and any others. Only real value transitions fire a re-announce (a provider re-publishing the same `online` state is ignored); clear the list to disable.
+The **Connectivity-change trigger paths** list (under **Re-announces**) holds the Signal K paths to watch for value changes. It defaults to the Starlink provider status path (`network.providers.starlink.status`, supplied by the `signalk-starlink` plugin) and the LTE operator-name path (`networking.lte.registerNetworkDisplay`, which changes on a roam or registration) and supports multiple providers — add any others you have. Subscribing to a path the server never publishes is harmless, so the defaults are safe to leave on even without that connectivity source. Only real value transitions fire a re-announce (a provider re-publishing the same `online` state, or the same operator name, is ignored); clear the list to disable.
 
 ## How alerting works
 

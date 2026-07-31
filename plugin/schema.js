@@ -187,17 +187,21 @@ function buildPluginSchema(interfaces) {
               "clients rediscover the node — and switch over to a working, " +
               "non-internet mesh path — the moment the boat's internet " +
               "connectivity changes (e.g. the Starlink link dropping or an " +
-              "LTE modem switching cells), instead of waiting up to the " +
-              "re-announce interval. Add one entry per connectivity " +
-              "provider. Defaults to the Starlink provider status path; " +
-              "clear the list to disable.",
-            default: ["network.providers.starlink.status"],
+              "LTE modem roaming to a new operator), instead of waiting up " +
+              "to the re-announce interval. Add one entry per connectivity " +
+              "provider. Defaults to the Starlink provider status path and " +
+              "the LTE operator-name path; clear the list to disable.",
+            default: [
+              "network.providers.starlink.status",
+              "networking.lte.registerNetworkDisplay",
+            ],
             items: {
               type: "string",
               title: "Signal K path",
               description:
                 "A vessels.self path to watch for value changes " +
-                "(e.g. network.providers.starlink.status).",
+                "(e.g. network.providers.starlink.status or " +
+                "networking.lte.registerNetworkDisplay).",
             },
           },
         },
