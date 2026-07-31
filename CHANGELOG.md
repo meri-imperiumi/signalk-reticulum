@@ -1,5 +1,5 @@
 # Changelog
-## [Unreleased]
+## [0.2.2] - 2026-07-30
 ### Added
 - Periodic re-announces: the node now periodically re-announces its destinations so cached mesh paths stay fresh (PROTOCOL-SPEC.md §7.5 / §9.7 — without it, transit relays evict the path within minutes and peers can no longer reach you after a TTL lapses). A new top-level `announce` config group exposes `reannounce_interval_minutes` (default 30, matching Reticulum's own default and Sideband's cadence). When enabled, both the `lxmf.delivery` and the `nomadnetwork.node` destinations (whichever are brought up) are re-announced on that cadence via `@reticulum/core`'s `startAnnouncing`/`stopAnnouncing`; the first announce still fires immediately on start, and the loops are torn down on stop. Set the interval to 0 to disable periodic re-announcing and fall back to a single announce at start. On by default so existing and fresh installs keep their mesh paths fresh without operator action
 
