@@ -72,3 +72,12 @@ Replies are sent back to the sender's `lxmf.delivery` destination (the message s
 ## Status
 
 Early development.
+
+## Setup recommendations
+
+- Have an RNode on the boat, preferably connected to the Signal K machine and configured to `roaming` mode (to let other clients know this RNode access point moves)
+- If your boat has an Internet uplink, configure also some internet-based Reticulum connections (see [directory](https://directory.rns.recipes/)). Set these to `bondary` mode
+- Have a mobile RNode for each crew member
+- It is also a great idea to run an LXMF propagation node on the boat
+
+This way Reticulum communications with the boat should work fine both over the internet (when available) and LoRa (when reachable). LXMF propagation nodes are used for store-and-forward as needed.
