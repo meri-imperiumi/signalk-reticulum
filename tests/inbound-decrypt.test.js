@@ -114,7 +114,7 @@ test("setupMessaging keeps a ratchet and an opportunistic inbound message decryp
 
     // B must have learned A's ratchet from the announce — the exact key A
     // holds, so the opportunistic packet B encrypts is one A can decrypt.
-    const learned = Destination.recallRatchets(
+    const learned = Destination.recallRatchet(
       lxmA.deliveryDest.destinationHash,
     );
     assert.ok(

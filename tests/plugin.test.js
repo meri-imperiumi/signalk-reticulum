@@ -264,8 +264,10 @@ function makeApp() {
 /** Like {@link makeApp} but also exposes a writable plugin data directory. */
 function makeAppWithDataDir() {
   const app = makeApp();
-  app.getDataDirPath = () =>
-    join(os.tmpdir(), `sk-reticulum-${process.pid}-${Date.now()}`);
+  // Signal K's real getDataDirPath() returns a stable path; compute it once
+  // so repeated calls (plugin start + assertions) compare equal.
+  const dir = join(os.tmpdir(), `sk-reticulum-${process.pid}-${Date.now()}`);
+  app.getDataDirPath = () => dir;
   return app;
 }
 
