@@ -170,6 +170,7 @@ test("buildPluginSchema exposes an announce group with a 30-minute default", () 
   assert.equal(announce.additionalProperties, false);
   assert.deepEqual(Object.keys(announce.properties), [
     "reannounce_interval_minutes",
+    "connectivity_paths",
   ]);
 
   const interval = announce.properties.reannounce_interval_minutes;
@@ -179,4 +180,11 @@ test("buildPluginSchema exposes an announce group with a 30-minute default", () 
   // 0 disables re-announcing (one-shot announce only); any value is allowed
   // from 0 up — Reticulum clamps sub-minute values itself.
   assert.equal(interval.minimum, 0);
+
+  // The connectivity-change trigger defaults to the Starlink provider status
+  // path and is an array so more providers (LTE modem, …) can be added.
+  const paths = announce.properties.connectivity_paths;
+  assert.equal(paths.type, "array");
+  assert.deepEqual(paths.default, ["network.providers.starlink.status"]);
+  assert.equal(paths.items.type, "string");
 });

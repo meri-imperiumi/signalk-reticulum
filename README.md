@@ -13,6 +13,7 @@ This plugin connects the [Signal K](https://signalk.org/) marine platform with t
 - **Crew alerts** — when Signal K raises a notification at the `alarm` or `emergency` level, an LXMF message is sent to each configured crew member.
 - **Incoming commands** — the node receives LXMF messages and answers text commands from any peer, starting with `ping` (replies `pong`).
 - **NomadNet site** — the plugin serves a NomadNet site showing the basic vessel state
+- **Connectivity-change re-announce** — when a connectivity indicator changes (Starlink dropping, an LTE modem switching cells, …) the node immediately re-announces its destinations so clients rediscover the boat over a working, non-internet mesh path without waiting for the next interval.
 
 ## Configuration
 
@@ -47,6 +48,12 @@ Each crew member is identified by the `lxmf.delivery` destination hash of their 
 To keep cached mesh paths fresh, the node periodically re-announces its destinations (`lxmf.delivery` and `nomadnetwork.node`, whichever are brought up). Without this, transit relays evict the path within minutes and peers can no longer reach you after a TTL lapses (PROTOCOL-SPEC.md §7.5 / §9.7).
 
 The **Re-announce interval (minutes)** setting (under **Re-announces**) controls the cadence and defaults to 30 minutes, matching Reticulum's own default. The first announce fires immediately on start, then repeats on the interval. Set it to 0 to disable periodic re-announcing and fall back to a single announce at start.
+
+### Connectivity-change trigger
+
+Beyond the periodic cadence, the node re-announces its destinations the moment a connectivity indicator changes, so clients switch over to a still-working mesh path without waiting for the next interval. The boat's *internet* connectivity (Starlink, an LTE modem, …) may come and go, but the Reticulum mesh paths (radio, serial, LAN peering) are unaffected — a fresh announce lets clients discover and use them right away.
+
+The **Connectivity-change trigger paths** list (under **Re-announces**) holds the Signal K paths to watch for value changes. It defaults to the Starlink provider status path (`network.providers.starlink.status`, supplied by the `signalk-starlink` plugin) and supports multiple providers — add your LTE modem's status path and any others. Only real value transitions fire a re-announce (a provider re-publishing the same `online` state is ignored); clear the list to disable.
 
 ## How alerting works
 

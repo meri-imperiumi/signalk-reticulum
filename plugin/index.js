@@ -23,6 +23,7 @@ const compression = require("./compression");
 const { resolveDisplayName } = require("./displayname");
 const { resolveAppearance } = require("./appearance");
 const { createStorageAdapter, setupCrewPersistence } = require("./storage");
+const { triggerAnnounce } = require("./announce");
 const { effectiveCrew } = require("./notifications");
 const { buildTelemetrySensors, packTelemetry } = require("./telemetry");
 const commands = require("./commands");
@@ -159,6 +160,72 @@ async function sendTelemetryToCrew(app, settings, deliverTelemetry) {
     }
   }
   return sent;
+}
+
+/**
+ * Default Signal K connectivity path whose value changes trigger an immediate,
+ * manual re-announce of every destination, so clients rediscover the boat the
+ * moment its internet connectivity changes (e.g. the Starlink link dropping)
+ * instead of waiting up to the re-announce interval. The first/easiest of
+ * several providers — operators add more (LTE modem, …) via the `announce`
+ * config group's `connectivity_paths`.
+ */
+const DEFAULT_CONNECTIVITY_PATH = "network.providers.starlink.status";
+
+/**
+ * Normalises a connectivity-path delta value into a stable comparable string
+ * so a repeating publish (the same `online` re-sent every poll) does not fire
+ * a re-announce — only an actual value transition does.
+ *
+ * Tolerates plain values and `{value}` Signal K update wrappers.
+ *
+ * @param {unknown} value
+ * @returns {string|undefined}
+ */
+function normalizeConnectivityValue(value) {
+  if (value && typeof value === "object" && "value" in value) {
+    value = value.value;
+  }
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Resolves the configured connectivity-change trigger paths into a unique
+ * list of non-empty, trimmed Signal K paths.
+ *
+ * An absent/non-array value falls back to the single default (Starlink), so
+ * the trigger works out of the box on a fresh install. An explicit empty
+ * array is honoured as "disabled" (the operator cleared the list), matching
+ * how the other config arrays behave.
+ *
+ * @param {unknown} raw
+ * @returns {string[]}
+ */
+function effectiveConnectivityPaths(raw) {
+  if (!Array.isArray(raw)) {
+    return [DEFAULT_CONNECTIVITY_PATH];
+  }
+  const seen = new Set();
+  const result = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const path = entry.trim();
+    if (!path || seen.has(path)) {
+      continue;
+    }
+    seen.add(path);
+    result.push(path);
+  }
+  return result;
 }
 
 module.exports = (app) => {
@@ -358,8 +425,14 @@ module.exports = (app) => {
         let deliver;
         /** Telemetry delivery callback (set when messaging comes up). */
         let deliverTelemetry;
+        /**
+         * Display name the LXMF delivery destination announces as. Captured
+         * here so the connectivity-change trigger can re-announce with the
+         * same name instead of resolving it a second time.
+         */
+        let displayName;
         try {
-          const displayName = resolveDisplayName({
+          displayName = resolveDisplayName({
             configured:
               config && config.messaging && config.messaging.display_name,
             vesselName: readSelf(app, "name"),
@@ -645,6 +718,73 @@ module.exports = (app) => {
           }
         }
 
+        // Re-announce every destination immediately when any configured
+        // connectivity indicator changes (Starlink dropping, an LTE modem
+        // switching cells, …). The boat's *internet* path may have appeared
+        // or vanished, but the Reticulum mesh paths are unaffected, so a
+        // fresh announce lets clients switch over to a working, non-internet
+        // route without waiting up to the re-announce interval. Only real
+        // value transitions fire — a repeating publish is ignored.
+        const connectivityPaths = effectiveConnectivityPaths(
+          config && config.announce && config.announce.connectivity_paths,
+        );
+        if (connectivityPaths.length && app.subscriptionmanager) {
+          try {
+            /** Last seen value per watched path, so only transitions fire. */
+            const lastByPath = new Map();
+            app.subscriptionmanager.subscribe(
+              {
+                context: "vessels.self",
+                subscribe: connectivityPaths.map((path) => ({
+                  path,
+                  policy: "instant",
+                })),
+              },
+              unsubscribes,
+              (err) => app.debug(`Connectivity subscription error: ${err}`),
+              (delta) => {
+                if (!delta || !delta.updates) {
+                  return;
+                }
+                let changed = false;
+                for (const update of delta.updates) {
+                  if (!update.values) {
+                    continue;
+                  }
+                  for (const v of update.values) {
+                    if (!v || !connectivityPaths.includes(v.path)) {
+                      continue;
+                    }
+                    const normalized = normalizeConnectivityValue(v.value);
+                    if (normalized === lastByPath.get(v.path)) {
+                      continue;
+                    }
+                    lastByPath.set(v.path, normalized);
+                    changed = true;
+                  }
+                }
+                if (!changed) {
+                  return;
+                }
+                Promise.resolve(
+                  triggerAnnounce(
+                    {
+                      lxmf: plugin.lxmf,
+                      displayName,
+                      nomadnet: plugin.nomadnet,
+                    },
+                    app.debug,
+                  ),
+                ).catch((e) =>
+                  app.debug(`Connectivity re-announce error: ${e.message}`),
+                );
+              },
+            );
+          } catch (e) {
+            app.debug(`Connectivity subscription error: ${e.message}`);
+          }
+        }
+
         const connectivity = usedSharedInstance
           ? "connected to shared Reticulum instance"
           : `${plugin.interfaces.length} interface(s) connected`;
@@ -706,3 +846,8 @@ module.exports.deps = deps;
 // without bringing up the full Reticulum stack.
 module.exports.buildSnapshot = buildSnapshot;
 module.exports.sendTelemetryToCrew = sendTelemetryToCrew;
+// Exposed for tests so the connectivity-trigger path/value helpers can be
+// exercised in isolation.
+module.exports.DEFAULT_CONNECTIVITY_PATH = DEFAULT_CONNECTIVITY_PATH;
+module.exports.normalizeConnectivityValue = normalizeConnectivityValue;
+module.exports.effectiveConnectivityPaths = effectiveConnectivityPaths;

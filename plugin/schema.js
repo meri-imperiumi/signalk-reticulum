@@ -177,6 +177,29 @@ function buildPluginSchema(interfaces) {
             default: 30,
             minimum: 0,
           },
+          connectivity_paths: {
+            type: "array",
+            title: "Connectivity-change trigger paths",
+            description:
+              "Signal K paths whose value changes trigger an immediate, " +
+              "manual re-announce of every destination (lxmf.delivery and " +
+              "nomadnetwork.node, whichever are brought up). This lets " +
+              "clients rediscover the node — and switch over to a working, " +
+              "non-internet mesh path — the moment the boat's internet " +
+              "connectivity changes (e.g. the Starlink link dropping or an " +
+              "LTE modem switching cells), instead of waiting up to the " +
+              "re-announce interval. Add one entry per connectivity " +
+              "provider. Defaults to the Starlink provider status path; " +
+              "clear the list to disable.",
+            default: ["network.providers.starlink.status"],
+            items: {
+              type: "string",
+              title: "Signal K path",
+              description:
+                "A vessels.self path to watch for value changes " +
+                "(e.g. network.providers.starlink.status).",
+            },
+          },
         },
         additionalProperties: false,
       },

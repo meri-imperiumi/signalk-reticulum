@@ -264,14 +264,39 @@ function makeApp() {
     },
     subscriptionmanager: {
       subscriptions: [],
+      /** @type {{onDelta:(delta:any)=>void, onError:(err:unknown)=>void}[]} */
+      _handlers: [],
       subscribe(spec, unsubs, onError, onDelta) {
         app.subscriptionmanager.subscriptions.push(spec);
+        app.subscriptionmanager._handlers.push({ onDelta, onError });
         unsubs.push(() => {
           app.subscriptionmanager.unsubscribed = true;
         });
-        app._onDelta = onDelta;
-        app._onError = onError;
       },
+    },
+    /**
+     * Dispatches a delta to every registered subscription handler, mirroring
+     * how the real Signal K server fans one delta out to all matching
+     * subscriptions (so the plugin's notifications and connectivity
+     * subscriptions both receive it).
+     */
+    _onDelta(delta) {
+      for (const { onDelta } of app.subscriptionmanager._handlers) {
+        try {
+          onDelta(delta);
+        } catch {
+          /* best effort, matches server delivery semantics */
+        }
+      }
+    },
+    _onError(err) {
+      for (const { onError } of app.subscriptionmanager._handlers) {
+        try {
+          onError(err);
+        } catch {
+          /* best effort */
+        }
+      }
     },
   };
   return app;
@@ -637,6 +662,170 @@ test("start falls back to a one-shot announce when the interval is 0", async () 
 
   assert.deepEqual(plugin.lxmf.announceCalls, ["My Boat"]);
   assert.equal(plugin.lxmf.startAnnouncingCalls.length, 0);
+});
+
+test("a connectivity-change on the default Starlink path re-announces both destinations", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+  FakeNomadDestination.instances.length = 0;
+
+  await plugin.start({
+    messaging: { display_name: "My Boat" },
+    nomadnet: { enabled: true },
+  });
+
+  const subs = app.subscriptionmanager.subscriptions;
+  assert.ok(
+    subs.some(
+      (s) =>
+        s.context === "vessels.self" &&
+        s.subscribe.some(
+          (sub) => sub.path === "network.providers.starlink.status",
+        ),
+    ),
+    "subscribed to the default connectivity path",
+  );
+
+  const lxmf = plugin.lxmf;
+  const node = FakeNomadDestination.instances[0];
+  // Re-announce is on by default, so only the periodic loop has run — no
+  // one-shot announce yet.
+  assert.deepEqual(lxmf.announceCalls, []);
+  assert.equal(node.announceCalls, 0);
+
+  app._onDelta({
+    updates: [
+      {
+        values: [
+          { path: "network.providers.starlink.status", value: "online" },
+        ],
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  // The first transition triggered an immediate re-announce of both.
+  assert.deepEqual(lxmf.announceCalls, ["My Boat"]);
+  assert.equal(node.announceCalls, 1);
+
+  await plugin.stop();
+});
+
+test("a repeating connectivity value does not re-announce again", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  await plugin.start({ messaging: { display_name: "My Boat" } });
+
+  const lxmf = plugin.lxmf;
+
+  // First transition fires.
+  app._onDelta({
+    updates: [
+      {
+        values: [
+          { path: "network.providers.starlink.status", value: "online" },
+        ],
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(lxmf.announceCalls, ["My Boat"]);
+
+  // Same value re-published (e.g. the Starlink plugin polling) is ignored.
+  app._onDelta({
+    updates: [
+      {
+        values: [
+          { path: "network.providers.starlink.status", value: "online" },
+        ],
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(lxmf.announceCalls, ["My Boat"], "no extra announce");
+
+  // A new value transitions again.
+  app._onDelta({
+    updates: [
+      {
+        values: [
+          { path: "network.providers.starlink.status", value: "offline" },
+        ],
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(lxmf.announceCalls, ["My Boat", "My Boat"]);
+
+  await plugin.stop();
+});
+
+test("configured connectivity paths replace the default and any of them fires", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  await plugin.start({
+    messaging: { display_name: "My Boat" },
+    announce: {
+      connectivity_paths: [
+        "network.providers.starlink.status",
+        "network.providers.lte.status",
+      ],
+    },
+  });
+
+  const subs = app.subscriptionmanager.subscriptions;
+  const watched = subs.find((s) =>
+    s.subscribe.some((sub) => sub.path === "network.providers.lte.status"),
+  );
+  assert.ok(watched, "both configured paths are watched");
+  assert.equal(
+    watched.subscribe.length,
+    2,
+    "both paths share one subscription",
+  );
+
+  const lxmf = plugin.lxmf;
+
+  // The non-default path also triggers a re-announce.
+  app._onDelta({
+    updates: [
+      {
+        values: [{ path: "network.providers.lte.status", value: "connected" }],
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(lxmf.announceCalls, ["My Boat"]);
+
+  await plugin.stop();
+});
+
+test("an empty connectivity_paths list disables the trigger subscription", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  await plugin.start({
+    messaging: { display_name: "My Boat" },
+    announce: { connectivity_paths: [] },
+  });
+
+  const subs = app.subscriptionmanager.subscriptions;
+  assert.ok(
+    !subs.some((s) =>
+      s.subscribe.some(
+        (sub) => sub.path === "network.providers.starlink.status",
+      ),
+    ),
+    "no connectivity subscription is set up",
+  );
+
+  await plugin.stop();
 });
 
 test("an alarm notification is forwarded to each crew member over LXMF", async () => {
