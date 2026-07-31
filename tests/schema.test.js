@@ -121,9 +121,9 @@ test("buildPluginSchema places one instance array per non-excluded interface bet
   assert.equal(keys[1], "use_shared_instance");
   assert.equal(keys[keys.length - 1], "appearance");
 
-  // The interface arrays land between use_shared_instance and identity, in
-  // registry order, excluding WebRTC.
-  const ifaceKeys = keys.slice(2, keys.indexOf("identity"));
+  // The interface arrays land between use_shared_instance and the announce
+  // group, in registry order, excluding WebRTC.
+  const ifaceKeys = keys.slice(2, keys.indexOf("announce"));
   assert.deepEqual(ifaceKeys, ["auto_interfaces", "tcp_clients"]);
 
   // Each array carries its interface's required fields.
@@ -160,4 +160,23 @@ test("buildPluginSchema exposes an appearance group with icon + hex colors", () 
   assert.equal(appearance.properties.bg_color.default, "#1a237e");
   assert.equal(appearance.properties.fg_color.format, "color");
   assert.equal(appearance.properties.bg_color.format, "color");
+});
+
+test("buildPluginSchema exposes an announce group with a 30-minute default", () => {
+  const schema = buildPluginSchema([]);
+  const announce = schema.properties.announce;
+
+  assert.equal(announce.type, "object");
+  assert.equal(announce.additionalProperties, false);
+  assert.deepEqual(Object.keys(announce.properties), [
+    "reannounce_interval_minutes",
+  ]);
+
+  const interval = announce.properties.reannounce_interval_minutes;
+  assert.equal(interval.type, "number");
+  // 30-minute default matches Reticulum's own DEFAULT_ANNOUNCE_INTERVAL_MS.
+  assert.equal(interval.default, 30);
+  // 0 disables re-announcing (one-shot announce only); any value is allowed
+  // from 0 up — Reticulum clamps sub-minute values itself.
+  assert.equal(interval.minimum, 0);
 });

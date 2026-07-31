@@ -150,6 +150,36 @@ function buildPluginSchema(interfaces) {
         default: true,
       },
       ...buildInterfaceArrays(interfaces),
+      announce: {
+        type: "object",
+        title: "Re-announces",
+        description:
+          "Periodically re-announce the node's destinations so cached " +
+          "mesh paths stay fresh. Reticulum's reference transport evicts " +
+          "unused paths within minutes (PROTOCOL-SPEC.md §7.5 / §9.7), so " +
+          "without periodic re-announces peers can no longer reach you after " +
+          "a transit-relay TTL lapses. When enabled, both the lxmf.delivery " +
+          "and the nomadnetwork.node destinations (whichever are brought up) " +
+          "are re-announced on the interval below; the first announce fires " +
+          "immediately on start. Set the interval to 0 to disable " +
+          "re-announcing and fall back to a single announce at start.",
+        properties: {
+          reannounce_interval_minutes: {
+            type: "number",
+            title: "Re-announce interval (minutes)",
+            description:
+              "How often to re-announce the node's destinations. Defaults to " +
+              "30 minutes, matching Reticulum's own default. A value of 0 " +
+              "disables periodic re-announcing (a single announce is still " +
+              "sent on start). Sub-minute values are clamped to a 60-second " +
+              "minimum by Reticulum — shorter intervals trigger ingress rate " +
+              "limiting and waste airtime (§9.7).",
+            default: 30,
+            minimum: 0,
+          },
+        },
+        additionalProperties: false,
+      },
       identity: {
         type: "object",
         title: "Identity",

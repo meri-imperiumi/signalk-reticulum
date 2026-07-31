@@ -1,4 +1,11 @@
 # Changelog
+## [Unreleased]
+### Added
+- Periodic re-announces: the node now periodically re-announces its destinations so cached mesh paths stay fresh (PROTOCOL-SPEC.md §7.5 / §9.7 — without it, transit relays evict the path within minutes and peers can no longer reach you after a TTL lapses). A new top-level `announce` config group exposes `reannounce_interval_minutes` (default 30, matching Reticulum's own default and Sideband's cadence). When enabled, both the `lxmf.delivery` and the `nomadnetwork.node` destinations (whichever are brought up) are re-announced on that cadence via `@reticulum/core`'s `startAnnouncing`/`stopAnnouncing`; the first announce still fires immediately on start, and the loops are torn down on stop. Set the interval to 0 to disable periodic re-announcing and fall back to a single announce at start. On by default so existing and fresh installs keep their mesh paths fresh without operator action
+
+### Fixed
+- Updated for the `@reticulum/core` 0.5.0 ratchet API change: `Destination.recallRatchets` (returning an array) is now `Destination.recallRatchet` (returning the single newest non-expired ratchet public key)
+
 ## [0.2.1] - 2026-07-23
 ### Added
 - Node appearance (icon + colors) is now advertised to LXMF peers (Sideband, MeshChat) so crew members' devices show a recognisable avatar for the boat alongside its telemetry. A new `appearance` config group exposes the Material Design Icon name and RGB foreground/background colors (with colour-picker `format: "color"` fields, defaulting to a white icon on nautical indigo). The appearance travels in the LXMF `FIELD_ICON_APPEARANCE` (0x04) message field — carried alongside each telemetry broadcast, the same coupling Sideband uses — with colors packed as 3-byte `bin` payloads exactly as Sideband's `struct.pack("!BBB", r, g, b)` expects. When the icon is left empty it is derived from the vessel's AIS ship type (`design.aisShipType`): a `sail-boat` icon for sailing vessels (type 36), a `ferry` icon for any other known type, and the `sail-boat` icon by default when no AIS type is available

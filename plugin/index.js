@@ -335,6 +335,23 @@ module.exports = (app) => {
           setupErrors = result.errors;
         }
 
+        // Resolve the periodic re-announce cadence so both the LXMF and
+        // NomadNet destinations use the same interval. An explicit 0 disables
+        // re-announcing (one-shot announce only); an absent/invalid value
+        // defaults to 30 minutes (PROTOCOL-SPEC.md §9.7 / Reticulum's own
+        // default), so existing configs and fresh installs both keep their
+        // mesh paths fresh without operator action.
+        const raw =
+          config && config.announce
+            ? config.announce.reannounce_interval_minutes
+            : undefined;
+        const configured = Number(raw);
+        const reannounceMinutes = Number.isNaN(configured)
+          ? 30
+          : Math.max(0, configured);
+        const announceIntervalMs =
+          reannounceMinutes > 0 ? reannounceMinutes * 60 * 1000 : null;
+
         // Bring up LXMF messaging so alerts can be sent to the crew. A failure
         // here is non-fatal: the node stays up for connectivity, just without
         // messaging (deliver stays undefined and alerts are skipped).
@@ -353,9 +370,20 @@ module.exports = (app) => {
             plugin.identity,
             {
               displayName,
+              announceIntervalMs,
             },
             app.debug,
           );
+          // Halt the LXMF periodic re-announce loop on teardown (the router
+          // has no stop() of its own; rns.stop() tears down interfaces).
+          const lxmf = plugin.lxmf;
+          unsubscribes.push(() => {
+            try {
+              lxmf.stopAnnouncing();
+            } catch {
+              /* best effort */
+            }
+          });
           deliver = makeDeliverer(plugin.lxmf, plugin.identity, app.debug);
           // Resolve the node's icon/colors once at startup (the vessel's AIS
           // ship type rarely changes) so every telemetry broadcast advertises
@@ -524,6 +552,7 @@ module.exports = (app) => {
               plugin.identity,
               {
                 displayName: nodeDisplayName,
+                announceIntervalMs,
                 getContext: () => ({
                   vesselName: readSelf(app, "name"),
                   banner: config.nomadnet && config.nomadnet.banner,

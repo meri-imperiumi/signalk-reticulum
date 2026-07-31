@@ -31,6 +31,14 @@ class FakeLxmRouter {
   async announce(name) {
     this.announceCalls.push(name);
   }
+  startAnnouncingCalls = [];
+  async startAnnouncing(name, options = {}) {
+    this.startAnnouncingCalls.push({ name, options });
+  }
+  stopAnnouncingCalls = 0;
+  stopAnnouncing() {
+    this.stopAnnouncingCalls += 1;
+  }
   async send(message, identity, linkId) {
     this.sent.push({ message, identity, linkId });
   }
@@ -89,6 +97,53 @@ test("setupMessaging skips announce when no display name is given", async () => 
   const router = await setupMessaging({}, {}, {});
 
   assert.equal(router.announceCalls.length, 0);
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("setupMessaging periodically re-announces when an interval is given", async () => {
+  deps.LXMRouter = FakeLxmRouter;
+  deps.toHex = (bytes) => Buffer.from(bytes).toString("hex");
+  const logs = [];
+
+  const router = await setupMessaging(
+    {},
+    {},
+    { displayName: "Boat", announceIntervalMs: 30 * 60 * 1000 },
+    (...a) => logs.push(a.join(" ")),
+  );
+
+  // startAnnouncing replaces the one-shot announce entirely.
+  assert.deepEqual(router.announceCalls, []);
+  assert.equal(router.startAnnouncingCalls.length, 1, "re-announce started");
+  assert.deepEqual(router.startAnnouncingCalls[0], {
+    name: "Boat",
+    options: { intervalMs: 30 * 60 * 1000 },
+  });
+  assert.ok(
+    logs.some((l) => /re-announcing every 1800s/.test(l)),
+    "re-announce cadence logged",
+  );
+
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("setupMessaging falls back to a one-shot announce when the interval is 0", async () => {
+  deps.LXMRouter = FakeLxmRouter;
+  deps.toHex = () => "00";
+
+  const router = await setupMessaging(
+    {},
+    {},
+    { displayName: "Boat", announceIntervalMs: 0 },
+  );
+
+  assert.deepEqual(router.announceCalls, ["Boat"], "one-shot announce used");
+  assert.equal(
+    router.startAnnouncingCalls.length,
+    0,
+    "re-announce not started",
+  );
+
   Object.assign(deps, REAL_DEPS);
 });
 

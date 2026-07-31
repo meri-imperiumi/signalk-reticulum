@@ -52,6 +52,14 @@ class FakeDestination extends EventTarget {
   async announce() {
     this.announceCalls += 1;
   }
+  startAnnouncingCalls = [];
+  startAnnouncing(options = {}) {
+    this.startAnnouncingCalls.push(options);
+  }
+  stopAnnouncingCalls = 0;
+  stopAnnouncing() {
+    this.stopAnnouncingCalls += 1;
+  }
   async acceptLink(packet) {
     const link = {
       linkId: new Uint8Array(16).fill(1),
@@ -490,6 +498,59 @@ test("the index handler is registered with ALLOW_ALL so anyone can browse", asyn
   FakeDestination.instances.length = 0;
   deps.DestType = REAL_DEST_TYPE;
   deps.Allow = REAL_ALLOW;
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("setupNomadNet periodically re-announces when an interval is given", async () => {
+  deps.Destination = FakeDestination;
+  deps.toHex = (bytes) => Buffer.from(bytes).toString("hex");
+  const rns = makeRns();
+  const logs = [];
+
+  const site = await setupNomadNet(
+    rns,
+    {},
+    { displayName: "Boat", announceIntervalMs: 30 * 60 * 1000 },
+    (...a) => logs.push(a.join(" ")),
+  );
+
+  // startAnnouncing replaces the one-shot announce entirely.
+  const dest = site.destination;
+  assert.equal(dest.announceCalls, 0, "no one-shot announce");
+  assert.equal(dest.startAnnouncingCalls.length, 1, "re-announce started");
+  assert.deepEqual(dest.startAnnouncingCalls[0], {
+    intervalMs: 30 * 60 * 1000,
+  });
+  assert.ok(
+    logs.some((l) => /re-announcing every 1800s/.test(l)),
+    "re-announce cadence logged",
+  );
+
+  FakeDestination.instances.length = 0;
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("stop halts the periodic re-announce loop", async () => {
+  deps.Destination = FakeDestination;
+  deps.toHex = () => "00";
+  const rns = makeRns();
+
+  const site = await setupNomadNet(
+    rns,
+    {},
+    {
+      displayName: "Boat",
+      announceIntervalMs: 30 * 60 * 1000,
+    },
+  );
+  const dest = site.destination;
+  assert.equal(dest.stopAnnouncingCalls, 0, "not stopped yet");
+
+  await site.stop();
+
+  assert.equal(dest.stopAnnouncingCalls, 1, "re-announce stopped on teardown");
+
+  FakeDestination.instances.length = 0;
   Object.assign(deps, REAL_DEPS);
 });
 

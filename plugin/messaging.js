@@ -51,7 +51,10 @@ const deps = {
  *
  * @param {object} rns - A Reticulum instance (owns the transport/interfaces).
  * @param {object} identity - The sender Reticulum identity.
- * @param {{displayName?:string}} [options]
+ * @param {{displayName?:string, announceIntervalMs?:number}} [options]
+ *   When `announceIntervalMs` is a positive number the `lxmf.delivery`
+ *   destination is periodically re-announced at that cadence (the first
+ *   announce fires immediately) instead of announced once.
  * @param {(...args:any[])=>void} [log]
  * @returns {Promise<object>} The initialised LXMRouter (also exposes
  *   `deliveryDest.destinationHash`, the node's own LXMF address).
@@ -61,12 +64,30 @@ async function setupMessaging(rns, identity, options = {}, log = () => {}) {
   await lxmf.init();
   if (options.displayName) {
     try {
-      await lxmf.announce(options.displayName);
-      log(
-        `Announced LXMF destination ${deps.toHex(
-          lxmf.deliveryDest.destinationHash,
-        )} as "${options.displayName}"`,
-      );
+      const intervalMs =
+        options.announceIntervalMs && options.announceIntervalMs > 0
+          ? options.announceIntervalMs
+          : null;
+      if (intervalMs) {
+        // startAnnouncing sets the app_data from the display name, fires the
+        // first announce immediately, and repeats on the interval — so it
+        // replaces the one-shot announce entirely.
+        await lxmf.startAnnouncing(options.displayName, { intervalMs });
+        log(
+          `Announced LXMF destination ${deps.toHex(
+            lxmf.deliveryDest.destinationHash,
+          )} as "${options.displayName}" (re-announcing every ${
+            Math.round((intervalMs / 1000) * 10) / 10
+          }s)`,
+        );
+      } else {
+        await lxmf.announce(options.displayName);
+        log(
+          `Announced LXMF destination ${deps.toHex(
+            lxmf.deliveryDest.destinationHash,
+          )} as "${options.displayName}"`,
+        );
+      }
     } catch (e) {
       log(`Failed to announce LXMF destination: ${e.message}`);
     }

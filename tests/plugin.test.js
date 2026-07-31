@@ -131,6 +131,14 @@ class FakeLxmRouter extends EventTarget {
   async announce(name) {
     this.announceCalls.push(name);
   }
+  startAnnouncingCalls = [];
+  async startAnnouncing(name, options = {}) {
+    this.startAnnouncingCalls.push({ name, options });
+  }
+  stopAnnouncingCalls = 0;
+  stopAnnouncing() {
+    this.stopAnnouncingCalls += 1;
+  }
   async send(message, identity, linkId) {
     this.sent.push({ message, identity, linkId });
   }
@@ -178,6 +186,14 @@ class FakeNomadDestination extends EventTarget {
   }
   async announce() {
     this.announceCalls += 1;
+  }
+  startAnnouncingCalls = [];
+  startAnnouncing(options = {}) {
+    this.startAnnouncingCalls.push(options);
+  }
+  stopAnnouncingCalls = 0;
+  stopAnnouncing() {
+    this.stopAnnouncingCalls += 1;
   }
   async acceptLink(packet) {
     const link = {
@@ -543,7 +559,13 @@ test("start brings up LXMF messaging, announces, and subscribes to notifications
 
   assert.ok(plugin.lxmf instanceof FakeLxmRouter, "LXMF router created");
   assert.equal(plugin.lxmf.initCalls, 1);
-  assert.deepEqual(plugin.lxmf.announceCalls, ["My Boat"]);
+  // Re-announce is on by default, so the delivery destination is announced
+  // via the periodic loop (which fires the first announce immediately)
+  // rather than as a one-shot announce.
+  assert.deepEqual(plugin.lxmf.announceCalls, []);
+  assert.deepEqual(plugin.lxmf.startAnnouncingCalls, [
+    { name: "My Boat", options: { intervalMs: 30 * 60 * 1000 } },
+  ]);
 
   const subs = app.subscriptionmanager.subscriptions;
   assert.ok(
@@ -554,6 +576,67 @@ test("start brings up LXMF messaging, announces, and subscribes to notifications
     ),
     "subscribed to notifications.*",
   );
+});
+
+test("start re-announces both LXMF and NomadNet destinations on the configured interval", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+  FakeNomadDestination.instances.length = 0;
+
+  await plugin.start({
+    messaging: { display_name: "My Boat" },
+    nomadnet: { enabled: true },
+    announce: { reannounce_interval_minutes: 15 },
+  });
+
+  const intervalMs = 15 * 60 * 1000;
+
+  // The LXMF delivery destination re-announces (no one-shot announce).
+  assert.ok(plugin.lxmf instanceof FakeLxmRouter, "LXMF router created");
+  const lxmf = plugin.lxmf;
+  assert.deepEqual(lxmf.announceCalls, []);
+  assert.deepEqual(lxmf.startAnnouncingCalls, [
+    { name: "My Boat", options: { intervalMs } },
+  ]);
+
+  // The NomadNet node destination re-announces too.
+  const node = FakeNomadDestination.instances[0];
+  assert.equal(node.announceCalls, 0, "no one-shot NomadNet announce");
+  assert.deepEqual(node.startAnnouncingCalls, [{ intervalMs }]);
+
+  await plugin.stop();
+
+  assert.equal(lxmf.stopAnnouncingCalls, 1, "LXMF re-announce stopped");
+  assert.equal(node.stopAnnouncingCalls, 1, "NomadNet re-announce stopped");
+});
+
+test("start defaults to a 30-minute re-announce interval when unset", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  await plugin.start({ messaging: { display_name: "My Boat" } });
+
+  assert.deepEqual(plugin.lxmf.startAnnouncingCalls, [
+    { name: "My Boat", options: { intervalMs: 30 * 60 * 1000 } },
+  ]);
+
+  await plugin.stop();
+});
+
+test("start falls back to a one-shot announce when the interval is 0", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  await plugin.start({
+    messaging: { display_name: "My Boat" },
+    announce: { reannounce_interval_minutes: 0 },
+  });
+
+  assert.deepEqual(plugin.lxmf.announceCalls, ["My Boat"]);
+  assert.equal(plugin.lxmf.startAnnouncingCalls.length, 0);
 });
 
 test("an alarm notification is forwarded to each crew member over LXMF", async () => {
@@ -1010,7 +1093,10 @@ test("start brings up the NomadNet site, announces and serves the index page", a
     dest.registered.map((r) => r.path),
     ["/page/index.mu"],
   );
-  assert.equal(dest.announceCalls, 1, "node announced");
+  assert.equal(dest.announceCalls, 0, "no one-shot announce");
+  // Re-announce is on by default, so the node is announced via the periodic
+  // loop (which fires the first announce immediately).
+  assert.deepEqual(dest.startAnnouncingCalls, [{ intervalMs: 30 * 60 * 1000 }]);
 });
 
 test("the served index page shows the vessel name", async () => {

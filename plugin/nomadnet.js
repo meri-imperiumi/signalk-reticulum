@@ -348,6 +348,9 @@ function identityLabel(identity) {
  * @param {object} [options]
  * @param {string} [options.displayName] - Node name announced in app_data
  *   (defaults to "Signal K").
+ * @param {number} [options.announceIntervalMs] - When positive, re-announce
+ *   the node destination at this cadence (first announce fires immediately)
+ *   instead of announcing once.
  * @param {() => {vesselName?: unknown, banner?: unknown, telemetry?: object}}
  *   [options.getContext] - Called on each page request to build the render
  *   context (vessel name, optional banner, raw telemetry values), so the page
@@ -438,12 +441,29 @@ async function setupNomadNet(rns, identity, options = {}, log = () => {}) {
   dest.addEventListener("link_request", onLinkRequest);
 
   try {
-    await dest.announce();
-    log(
-      `Announced NomadNet node ${deps.toHex(
-        dest.destinationHash,
-      )} as "${displayName}"`,
-    );
+    const intervalMs =
+      cfg.announceIntervalMs && cfg.announceIntervalMs > 0
+        ? cfg.announceIntervalMs
+        : null;
+    if (intervalMs) {
+      // startAnnouncing fires the first announce immediately and repeats on
+      // the interval, so it replaces the one-shot announce entirely.
+      dest.startAnnouncing({ intervalMs });
+      log(
+        `Announced NomadNet node ${deps.toHex(
+          dest.destinationHash,
+        )} as "${displayName}" (re-announcing every ${
+          Math.round((intervalMs / 1000) * 10) / 10
+        }s)`,
+      );
+    } else {
+      await dest.announce();
+      log(
+        `Announced NomadNet node ${deps.toHex(
+          dest.destinationHash,
+        )} as "${displayName}"`,
+      );
+    }
   } catch (e) {
     log(`Failed to announce NomadNet node: ${e.message}`);
   }
@@ -457,6 +477,11 @@ async function setupNomadNet(rns, identity, options = {}, log = () => {}) {
      * Best-effort: per-step failures are swallowed so teardown always completes.
      */
     async stop() {
+      try {
+        dest.stopAnnouncing();
+      } catch {
+        /* best effort */
+      }
       if (onLinkRequest) {
         try {
           dest.removeEventListener("link_request", onLinkRequest);
