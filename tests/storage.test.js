@@ -8,6 +8,8 @@ const {
   deps,
   createStorageAdapter,
   setupCrewPersistence,
+  setupPropagationNodePersistence,
+  watchAnnounces,
 } = require("../plugin/storage");
 const { FileStorageAdapter } = require("@reticulum/node");
 
@@ -156,6 +158,77 @@ test("setupCrewPersistence logs but does not throw when store fails", async () =
   announce(rns, hexToBytes(CREW_DEST));
   await new Promise((r) => setTimeout(r, 0));
   assert.ok(logs.some((l) => /Failed to persist crew member/.test(l)));
+});
+
+// --- setupPropagationNodePersistence ---------------------------------------
+
+/** A propagation node destination hash used across the announce tests. */
+const PROP_NODE = "fedcba0987654321fedcba0987654321";
+
+test("setupPropagationNodePersistence is a no-op without a node hash", async () => {
+  const rns = makeFakeRns();
+  setupPropagationNodePersistence(rns, "");
+  announce(rns, hexToBytes(PROP_NODE));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(rns.persistor.storeCalls.length, 0);
+});
+
+test("setupPropagationNodePersistence is a no-op when the node lacks a transport or persistor", () => {
+  assert.equal(
+    typeof setupPropagationNodePersistence(null, PROP_NODE),
+    "function",
+  );
+  const rns = { transport: new EventTarget() }; // no persistor
+  assert.equal(
+    typeof setupPropagationNodePersistence(rns, PROP_NODE),
+    "function",
+  );
+});
+
+test("setupPropagationNodePersistence stores the node when its announce is heard", async () => {
+  const logs = [];
+  const rns = makeFakeRns();
+  setupPropagationNodePersistence(rns, PROP_NODE, (...a) =>
+    logs.push(a.join(" ")),
+  );
+
+  announce(rns, hexToBytes(PROP_NODE), { appData: new Uint8Array([5]) });
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(rns.persistor.storeCalls.length, 1);
+  const call = rns.persistor.storeCalls[0];
+  assert.deepEqual(call.hash, hexToBytes(PROP_NODE));
+  assert.ok(call.opts.announce, "announce detail forwarded to the persistor");
+  assert.equal(call.opts.announce.appData[0], 5);
+  assert.ok(
+    logs.some((l) => /Persisted propagation node/.test(l)),
+    "the propagation-node label is used in the log",
+  );
+});
+
+test("setupPropagationNodePersistence ignores announces from other destinations", async () => {
+  const rns = makeFakeRns();
+  setupPropagationNodePersistence(rns, PROP_NODE);
+  announce(rns, hexToBytes(CREW_DEST));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(rns.persistor.storeCalls.length, 0);
+});
+
+test("setupPropagationNodePersistence unsubscribe stops further persistence", async () => {
+  const rns = makeFakeRns();
+  const unsub = setupPropagationNodePersistence(rns, PROP_NODE);
+  unsub();
+  announce(rns, hexToBytes(PROP_NODE));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(rns.persistor.storeCalls.length, 0);
+});
+
+test("watchAnnounces is a no-op when no hashes are given", async () => {
+  const rns = makeFakeRns();
+  watchAnnounces(rns, [], "anything");
+  announce(rns, hexToBytes(CREW_DEST));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(rns.persistor.storeCalls.length, 0);
 });
 
 test("deps are restored after the module-level overrides", () => {

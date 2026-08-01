@@ -12,6 +12,7 @@ This plugin connects the [Signal K](https://signalk.org/) marine platform with t
 - **LXMF messaging** — registers the standard `lxmf.delivery` destination and announces the node to the mesh.
 - **Crew alerts** — when Signal K raises a notification at the `alarm` or `emergency` level, an LXMF message is sent to each configured crew member.
 - **Incoming commands** — the node receives LXMF messages and answers text commands from any peer, starting with `ping` (replies `pong`).
+- **Store-and-forward** — when an LXMF propagation node is configured, the node periodically pulls messages held for it while it was offline, and forwards alerts to a crew member it can't reach directly to the node for store-and-forward delivery instead of dropping them.
 - **NomadNet site** — the plugin serves a NomadNet site showing the basic vessel state
 - **Connectivity-change re-announce** — when a connectivity indicator changes (Starlink dropping, an LTE modem switching cells, …) the node immediately re-announces its destinations so clients rediscover the boat over a working, non-internet mesh path without waiting for the next interval.
 
@@ -43,6 +44,17 @@ Each crew member is identified by the `lxmf.delivery` destination hash of their 
 - **Allow crew to toggle digital switches by LXMF message** — when enabled (off by default), a crew member can text `turn <switch> on` / `turn <switch> off` to set `electrical.switches.<switch>.state`.
 - **LXMF display name** — the name announced to the mesh for this node's `lxmf.delivery` destination, shown on crew members' messaging devices.
 
+### Store-and-forward
+
+LXMF messages can be delivered store-and-forward through an LXMF propagation node. The node acts as a **client** of a propagation node — it never runs the propagation role itself. Run a dedicated propagation node on the boat (NomadNet, Sideband, or `rnsd`) and enter its `lxmf.propagation` destination hash (32 hexadecimal characters) under **LXMF store-and-forward (propagation node)**.
+
+When enabled, two things happen:
+
+- **Receiving** — the node periodically pulls messages the propagation node is holding for it (default every 5 minutes, configurable under **Sync interval**), so messages sent to the boat while it was offline are delivered on the next sync. Synced messages are dispatched through the same command handler as direct ones.
+- **Sending** — an alert to a crew member the node can't reach directly (no known mesh path) is submitted to the propagation node for store-and-forward delivery instead of being dropped; a reachable crew member still receives the alert directly. Telemetry broadcasts and command replies always use direct delivery.
+
+The propagation node's identity is persisted the moment it announces, so a restart can sync from it immediately.
+
 ### Re-announces
 
 To keep cached mesh paths fresh, the node periodically re-announces its destinations (`lxmf.delivery` and `nomadnetwork.node`, whichever are brought up). Without this, transit relays evict the path within minutes and peers can no longer reach you after a TTL lapses (PROTOCOL-SPEC.md §7.5 / §9.7).
@@ -61,7 +73,7 @@ The plugin subscribes to `notifications.*` on `vessels.self`. When a notificatio
 
 A flapping alert (e.g. a bilge sensor switching rapidly on and off) is only forwarded once per active episode. Once the notification clears, it is held for a debounce period before a new occurrence of the same alert will be forwarded again.
 
-Delivery is **opportunistic** by default: each message is sent as a single encrypted Reticulum packet addressed to the recipient's `lxmf.delivery` destination. This requires the recipient's identity to be known to the node (learned from the recipient announcing). Store-and-forward delivery via a propagation node is planned.
+Delivery is **opportunistic** by default: each message is sent as a single encrypted Reticulum packet addressed to the recipient's `lxmf.delivery` destination. This requires the recipient's identity to be known to the node (learned from the recipient announcing). When an LXMF propagation node is configured, an alert to a crew member with no known mesh path is instead submitted to the propagation node for store-and-forward delivery (held until the recipient next syncs); a reachable crew member still receives the alert directly. See [Store-and-forward](#store-and-forward).
 
 ## Incoming messages
 

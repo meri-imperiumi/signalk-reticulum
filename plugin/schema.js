@@ -298,6 +298,53 @@ function buildPluginSchema(interfaces) {
           additionalProperties: false,
         },
       },
+      propagation: {
+        type: "object",
+        title: "LXMF store-and-forward (propagation node)",
+        description:
+          "Act as a client of an LXMF propagation node for store-and-forward " +
+          "messaging. The node never runs the propagation role itself — run a " +
+          "dedicated propagation node (NomadNet, Sideband, rnsd) on the boat " +
+          "and enter its lxmf.propagation destination hash here. When enabled, " +
+          "the node periodically pulls messages the propagation node is holding " +
+          "for it (so messages sent to the boat while it was offline are " +
+          "delivered on the next sync), and outbound alerts to a crew member " +
+          "who can't be reached directly are submitted to the node for " +
+          "store-and-forward delivery instead of being dropped.",
+        properties: {
+          enabled: {
+            type: "boolean",
+            title: "Use a propagation node",
+            description:
+              "When enabled, the node syncs from (and submits to) the " +
+              "propagation node whose hash is configured below. Off by default.",
+            default: false,
+          },
+          node: {
+            type: "string",
+            title: "Propagation node destination hash",
+            description:
+              "The 32-character hexadecimal lxmf.propagation destination hash " +
+              "of the propagation node to use as a store-and-forward client.",
+            default: "",
+            pattern: "^[0-9a-fA-F]{32}$",
+            minLength: 32,
+            maxLength: 32,
+          },
+          sync_interval_minutes: {
+            type: "number",
+            title: "Sync interval (minutes)",
+            description:
+              "How often to pull stored messages from the propagation node. " +
+              "Clamped to a 1-minute minimum. Each sync establishes a link to " +
+              "the node and exchanges any new messages, so pick a cadence that " +
+              "suits the mesh bandwidth. Defaults to 5 minutes.",
+            default: 5,
+            minimum: 1,
+          },
+        },
+        additionalProperties: false,
+      },
       nomadnet: {
         type: "object",
         title: "NomadNet site",

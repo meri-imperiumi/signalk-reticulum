@@ -4,7 +4,13 @@
  * @param {import("@signalk/server-api").ServerAPI} app
  * @returns {import("@signalk/server-api").Plugin}
  */
-const { Reticulum, toHex, LXMessage, Destination } = require("@reticulum/core");
+const {
+  Reticulum,
+  toHex,
+  fromHex,
+  LXMessage,
+  Destination,
+} = require("@reticulum/core");
 const {
   getInterface,
   listInterfaces,
@@ -22,8 +28,19 @@ const { readNumber, readPosition, readString } = require("./nomadnet");
 const compression = require("./compression");
 const { resolveDisplayName } = require("./displayname");
 const { resolveAppearance } = require("./appearance");
-const { createStorageAdapter, setupCrewPersistence } = require("./storage");
+const {
+  createStorageAdapter,
+  setupCrewPersistence,
+  setupPropagationNodePersistence,
+} = require("./storage");
 const { triggerAnnounce } = require("./announce");
+const {
+  normalizeNodeHash,
+  configurePropagationNode,
+  syncFromNode,
+  makePropagationDeliverer,
+  makeAutoDeliverer,
+} = require("./propagation");
 const { effectiveCrew } = require("./notifications");
 const { buildTelemetrySensors, packTelemetry } = require("./telemetry");
 const commands = require("./commands");
@@ -40,6 +57,7 @@ const deps = {
   connectSharedInstance: LocalClientInterface.connectToSharedInstance,
   createStorageAdapter,
   setupCrewPersistence,
+  setupPropagationNodePersistence,
 };
 
 /**
@@ -435,6 +453,12 @@ module.exports = (app) => {
         // here is non-fatal: the node stays up for connectivity, just without
         // messaging (deliver stays undefined and alerts are skipped).
         let deliver;
+        /**
+         * Alert delivery callback. Defaults to the direct (opportunistic/link)
+         * deliverer, but is wrapped in a direct-first / propagation-fallback
+         * deliverer when an LXMF propagation node is configured.
+         */
+        let alertDeliver;
         /** Telemetry delivery callback (set when messaging comes up). */
         let deliverTelemetry;
         /**
@@ -597,6 +621,88 @@ module.exports = (app) => {
           app.debug(`Messaging setup error: ${e.message}`);
         }
 
+        // --- LXMF store-and-forward (propagation-node client) --------------
+        // The node acts as a *client* of an external LXMF propagation node:
+        // it pulls messages the node is holding for it (receiving) and submits
+        // outbound messages to the node when a recipient can't be reached
+        // directly (sending). The node never runs the propagation role itself.
+        // Alerts default to the direct deliverer above; when a propagation
+        // node is configured the direct deliverer is wrapped so a recipient
+        // with no known path is reached via store-and-forward instead.
+        alertDeliver = deliver;
+        let propagationNodeHex = "";
+        if (config && config.propagation && config.propagation.enabled) {
+          propagationNodeHex = normalizeNodeHash(config.propagation.node);
+          if (!propagationNodeHex) {
+            app.debug(
+              "Propagation enabled but no valid node destination hash configured",
+            );
+          }
+        }
+        if (propagationNodeHex && plugin.lxmf) {
+          // Persist the propagation node's identity the moment it announces,
+          // so a restart can sync from it immediately instead of waiting to
+          // hear it again.
+          unsubscribes.push(
+            deps.setupPropagationNodePersistence(
+              rns,
+              propagationNodeHex,
+              app.debug,
+            ),
+          );
+          const configured = configurePropagationNode(
+            plugin.lxmf,
+            propagationNodeHex,
+            app.debug,
+          );
+          if (configured) {
+            // Receiving: periodically pull messages the propagation node is
+            // holding for this node. Synced messages dispatch through the
+            // same `message` event as direct ones, so they reach the command
+            // handler unchanged.
+            const rawInterval = Number(
+              config.propagation.sync_interval_minutes,
+            );
+            const intervalMinutes = Math.max(
+              1,
+              Number.isNaN(rawInterval) ? 5 : rawInterval,
+            );
+            const intervalMs = intervalMinutes * 60 * 1000;
+            const syncOnce = () =>
+              syncFromNode(plugin.lxmf, plugin.identity, app.debug).catch((e) =>
+                app.debug(`LXMF propagation sync error: ${e.message}`),
+              );
+            // Sync shortly after start so messages stored while the node was
+            // offline are picked up without waiting a full interval, then on
+            // the recurring timer.
+            const initial = setTimeout(syncOnce, 5000);
+            const timer = setInterval(syncOnce, intervalMs);
+            unsubscribes.push(() => {
+              clearTimeout(initial);
+              clearInterval(timer);
+            });
+
+            // Sending: wrap the direct deliverer so a recipient with no known
+            // path is reached via store-and-forward. A reachable recipient
+            // still gets the message directly (promptly).
+            const propagationDeliver = makePropagationDeliverer(
+              plugin.lxmf,
+              plugin.identity,
+              app.debug,
+            );
+            alertDeliver = makeAutoDeliverer({
+              directDeliver: deliver,
+              propagationDeliver,
+              hasPath:
+                rns.transport && typeof rns.transport.hasPath === "function"
+                  ? rns.transport.hasPath.bind(rns.transport)
+                  : undefined,
+              fromHex,
+              debug: app.debug,
+            });
+          }
+        }
+
         // Optionally broadcast a Sideband-compatible telemetry snapshot
         // (position, battery, depth/tide/wind/anchor as custom sensors) to every
         // configured crew member on a fixed interval. Opt-in: nothing is sent
@@ -715,7 +821,7 @@ module.exports = (app) => {
                         v.value,
                         episodes,
                         config,
-                        deliver,
+                        alertDeliver,
                         app,
                       ),
                     ).catch((e) =>

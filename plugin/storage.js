@@ -38,31 +38,33 @@ function createStorageAdapter(dataDirPath, log = () => {}) {
 }
 
 /**
- * Listens for transport announces from configured crew members and persists
- * their identity/ratchet/path data pre-emptively through the node's persistor,
- * so a restart can still reach them before any message round-trip happens.
+ * Listens for transport announces from any destination whose hash is in
+ * `hashes` and persists its identity/ratchet/path data pre-emptively through
+ * the node's persistor, so a restart can still reach it before any message
+ * round-trip happens.
  *
  * Returns an unsubscribe function that detaches the listener (safe to call
- * repeatedly). It is a no-op (returns a no-op unsubscribe) when the node lacks a
- * transport/persistor (persistence disabled, or test fakes) or when no crew is
- * configured. Per-announce failures are logged and never thrown into the
- * transport's event dispatch.
+ * repeatedly). It is a no-op (returns a no-op unsubscribe) when the node lacks
+ * a transport/persistor (persistence disabled, or test fakes) or when no hash
+ * is given. `label` is used in the log lines so crew members and the
+ * propagation node are distinguishable in the server log. Per-announce
+ * failures are logged and never thrown into the transport's event dispatch.
  *
  * @param {{transport?:EventTarget, persistor?:{store(hash:Uint8Array|string, opts?:{announce?:object}):Promise<void>}}|null|undefined} rns
- * @param {unknown} crew - Raw `crew` config (array of `{name, destination}`).
+ * @param {string[]} hashes - Destination hashes (lowercase hex) to watch.
+ * @param {string} label - Human-readable label used in log lines.
  * @param {(...args:any[])=>void} [log]
  * @returns {() => void}
  */
-function setupCrewPersistence(rns, crew, log = () => {}) {
+function watchAnnounces(rns, hashes, label, log = () => {}) {
   const noop = () => {};
   if (!rns || !rns.transport || !rns.persistor) {
     return noop;
   }
-  const members = effectiveCrew(crew, log);
-  if (members.length === 0) {
+  if (!hashes || hashes.length === 0) {
     return noop;
   }
-  const watched = new Set(members.map((m) => m.destinationHash));
+  const watched = new Set(hashes);
 
   const onAnnounce = (event) => {
     const detail = event && event.detail;
@@ -76,8 +78,8 @@ function setupCrewPersistence(rns, crew, log = () => {}) {
     }
     // Fire-and-forget: failures are logged, never thrown into the transport.
     Promise.resolve(rns.persistor.store(destinationHash, { announce: detail }))
-      .then(() => log(`Persisted crew member ${hex} from announce`))
-      .catch((e) => log(`Failed to persist crew member ${hex}: ${e.message}`));
+      .then(() => log(`Persisted ${label} ${hex} from announce`))
+      .catch((e) => log(`Failed to persist ${label} ${hex}: ${e.message}`));
   };
   rns.transport.addEventListener("announce", onAnnounce);
   return () => {
@@ -89,8 +91,59 @@ function setupCrewPersistence(rns, crew, log = () => {}) {
   };
 }
 
+/**
+ * Listens for transport announces from configured crew members and persists
+ * their identity/ratchet/path data pre-emptively through the node's persistor,
+ * so a restart can still reach them before any message round-trip happens.
+ *
+ * Returns an unsubscribe function that detaches the listener (safe to call
+ * repeatedly). It is a no-op (returns a no-op unsubscribe) when the node lacks a
+ * transport/persistor (persistence disabled, or test fakes) or when no crew is
+ * configured.
+ *
+ * @param {{transport?:EventTarget, persistor?:{store(hash:Uint8Array|string, opts?:{announce?:object}):Promise<void>}}|null|undefined} rns
+ * @param {unknown} crew - Raw `crew` config (array of `{name, destination}`).
+ * @param {(...args:any[])=>void} [log]
+ * @returns {() => void}
+ */
+function setupCrewPersistence(rns, crew, log = () => {}) {
+  const members = effectiveCrew(crew, log);
+  if (members.length === 0) {
+    return () => {};
+  }
+  return watchAnnounces(
+    rns,
+    members.map((m) => m.destinationHash),
+    "crew member",
+    log,
+  );
+}
+
+/**
+ * Listens for a transport announce from the configured LXMF propagation node
+ * and persists its identity/path data pre-emptively through the node's
+ * persistor, so a restart can sync from it immediately instead of waiting to
+ * hear its announce again.
+ *
+ * Returns an unsubscribe function (no-op when the node lacks a
+ * transport/persistor or no hash is given).
+ *
+ * @param {{transport?:EventTarget, persistor?:{store(hash:Uint8Array|string, opts?:{announce?:object}):Promise<void>}}|null|undefined} rns
+ * @param {string} nodeHex - The propagation node's destination hash (hex).
+ * @param {(...args:any[])=>void} [log]
+ * @returns {() => void}
+ */
+function setupPropagationNodePersistence(rns, nodeHex, log = () => {}) {
+  if (!nodeHex) {
+    return () => {};
+  }
+  return watchAnnounces(rns, [nodeHex], "propagation node", log);
+}
+
 module.exports = {
   deps,
   createStorageAdapter,
+  watchAnnounces,
   setupCrewPersistence,
+  setupPropagationNodePersistence,
 };

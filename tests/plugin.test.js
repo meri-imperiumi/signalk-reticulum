@@ -39,6 +39,15 @@ class FakeRns {
     this.transport = new EventTarget();
     this.transport.bound = [];
     this.transport.unbound = [];
+    // Mirrors Transport.has_path: whether a path is known to a destination.
+    // Defaults to true so direct delivery is used unless a test records a
+    // destination as unreachable via `rns.transport._unreachable`.
+    this.transport._unreachable = new Set();
+    this.transport.hasPath = (hash) => {
+      const hex =
+        hash instanceof Uint8Array ? Buffer.from(hash).toString("hex") : hash;
+      return !this.transport._unreachable.has(hex);
+    };
     this.transport.bindLocalDestination = (dest) => {
       this.transport.bound.push(dest);
     };
@@ -142,6 +151,25 @@ class FakeLxmRouter extends EventTarget {
   async send(message, identity, linkId) {
     this.sent.push({ message, identity, linkId });
   }
+  // Propagation (store-and-forward) client methods. The real LXMRouter is
+  // configured with `setOutboundPropagationNode`, submits messages via
+  // `submitToPropagationNode` and pulls stored messages via
+  // `syncFromPropagationNode`. The fakes record the calls so the wiring can
+  // be asserted without any RNS I/O.
+  propagationNodeCalls = [];
+  setOutboundPropagationNode(destinationHash) {
+    this.propagationNodeCalls.push(destinationHash);
+  }
+  submitted = [];
+  async submitToPropagationNode(message, identity) {
+    this.submitted.push({ message, identity });
+    return { transientId: new Uint8Array(16).fill(1), stampCost: 16 };
+  }
+  syncCalls = 0;
+  async syncFromPropagationNode(identity) {
+    this.syncCalls += 1;
+    return { received: 0, duplicates: 0 };
+  }
 }
 FakeLxmRouter.instances = [];
 
@@ -155,6 +183,13 @@ messaging.deps.LXMRouter = FakeLxmRouter;
 messaging.deps.LXMessage = FakeLXMessage;
 messaging.deps.fromHex = (hex) => Buffer.from(hex, "hex");
 messaging.deps.toHex = (bytes) => Buffer.from(bytes).toString("hex");
+
+// The propagation client module has its own dependency seam; point it at the
+// same fakes so store-and-forward wiring can be exercised without RNS I/O.
+const propagation = require("../plugin/propagation");
+propagation.deps.LXMessage = FakeLXMessage;
+propagation.deps.fromHex = (hex) => Buffer.from(hex, "hex");
+propagation.deps.toHex = (bytes) => Buffer.from(bytes).toString("hex");
 
 // --- Fakes so the plugin's NomadNet site can be exercised without RNS I/O ---
 
@@ -359,6 +394,7 @@ test("schema exposes identity and interface groups with the AutoInterface defaul
     "identity",
     "messaging",
     "crew",
+    "propagation",
     "nomadnet",
     "telemetry",
     "appearance",
@@ -1022,6 +1058,289 @@ test("stop tears down messaging and the notification subscription", async () => 
 
   assert.equal(plugin.lxmf, undefined);
   assert.equal(app.subscriptionmanager.unsubscribed, true);
+});
+
+// --- LXMF store-and-forward (propagation-node client) ---------------------
+
+const PROP_NODE = "fedcba0987654321fedcba0987654321";
+
+test("schema exposes an opt-in propagation configuration group", () => {
+  const group = makePlugin(makeApp()).schema().properties.propagation;
+  assert.equal(group.properties.enabled.default, false);
+  assert.equal(group.properties.node.default, "");
+  assert.equal(group.properties.node.pattern, "^[0-9a-fA-F]{32}$");
+  assert.equal(group.properties.sync_interval_minutes.default, 5);
+  assert.equal(group.properties.sync_interval_minutes.minimum, 1);
+});
+
+test("start does not configure a propagation node when disabled", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  await plugin.start({
+    messaging: { display_name: "Boat" },
+    propagation: { enabled: false, node: PROP_NODE },
+  });
+
+  assert.deepEqual(
+    plugin.lxmf.propagationNodeCalls,
+    [],
+    "no outbound propagation node set when disabled",
+  );
+  await plugin.stop();
+});
+
+test("start ignores propagation when enabled but no valid node is configured", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  await plugin.start({
+    messaging: { display_name: "Boat" },
+    propagation: { enabled: true, node: "not-a-hash" },
+  });
+
+  assert.deepEqual(plugin.lxmf.propagationNodeCalls, []);
+  assert.ok(
+    app.debugCalls.some((args) =>
+      /no valid node destination hash/.test(args.join(" ")),
+    ),
+  );
+  await plugin.stop();
+});
+
+test("start configures the propagation node and schedules periodic syncs", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  const scheduled = [];
+  const origSetTimeout = globalThis.setTimeout;
+  const origSetInterval = globalThis.setInterval;
+  globalThis.setTimeout = (fn) => {
+    scheduled.push({ kind: "timeout", fn });
+    return 0;
+  };
+  globalThis.setInterval = (fn) => {
+    scheduled.push({ kind: "interval", fn });
+    return 0;
+  };
+  try {
+    await plugin.start({
+      messaging: { display_name: "Boat" },
+      propagation: { enabled: true, node: PROP_NODE, sync_interval_minutes: 3 },
+    });
+
+    // The outbound propagation node is set on the router.
+    assert.deepEqual(plugin.lxmf.propagationNodeCalls, [
+      Buffer.from(PROP_NODE, "hex"),
+    ]);
+    assert.ok(
+      app.debugCalls.some((args) =>
+        /Configured LXMF propagation node/.test(args.join(" ")),
+      ),
+    );
+
+    // A sync timer (initial + interval) is scheduled.
+    assert.equal(
+      scheduled.filter((s) => s.kind === "timeout").length,
+      1,
+      "initial sync scheduled",
+    );
+    const interval = scheduled.find((s) => s.kind === "interval");
+    assert.ok(interval, "recurring sync scheduled");
+
+    // Firing the initial sync drives syncFromPropagationNode.
+    assert.equal(plugin.lxmf.syncCalls, 0);
+    await scheduled.find((s) => s.kind === "timeout").fn();
+    assert.equal(plugin.lxmf.syncCalls, 1, "initial sync ran");
+
+    // Firing the recurring sync drives it again.
+    await interval.fn();
+    assert.equal(plugin.lxmf.syncCalls, 2, "recurring sync ran");
+  } finally {
+    globalThis.setTimeout = origSetTimeout;
+    globalThis.setInterval = origSetInterval;
+    await plugin.stop();
+  }
+});
+
+test("start clamps the sync interval to a 1-minute minimum", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  const scheduled = [];
+  const origSetTimeout = globalThis.setTimeout;
+  const origSetInterval = globalThis.setInterval;
+  globalThis.setTimeout = (fn) => {
+    scheduled.push(fn);
+    return 0;
+  };
+  globalThis.setInterval = (fn, ms) => {
+    scheduled.push({ fn, ms });
+    return 0;
+  };
+  try {
+    await plugin.start({
+      messaging: { display_name: "Boat" },
+      propagation: { enabled: true, node: PROP_NODE, sync_interval_minutes: 0 },
+    });
+
+    const interval = scheduled.find((o) => o && o.ms != null);
+    assert.equal(interval.ms, 60 * 1000, "clamped to 1 minute");
+  } finally {
+    globalThis.setTimeout = origSetTimeout;
+    globalThis.setInterval = origSetInterval;
+    await plugin.stop();
+  }
+});
+
+test("an alert to a reachable crew member is delivered directly (not via propagation)", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+  const dest = "0123456789abcdef0123456789abcdef";
+
+  await plugin.start({
+    messaging: { send_alerts: true },
+    crew: [{ name: "Alice", destination: dest }],
+    propagation: { enabled: true, node: PROP_NODE },
+  });
+  const router = plugin.lxmf;
+
+  app._onDelta({
+    updates: [
+      {
+        values: [
+          {
+            path: "notifications.bilge",
+            value: { state: "alarm", message: "Bilge!" },
+          },
+        ],
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  // The recipient is reachable (FakeRns.hasPath defaults true), so the alert
+  // goes out as a direct opportunistic send, not a propagation submit.
+  assert.equal(router.sent.length, 1, "delivered directly");
+  assert.equal(
+    router.submitted.length,
+    0,
+    "not submitted to the propagation node",
+  );
+
+  await plugin.stop();
+});
+
+test("an alert to an unreachable crew member falls back to store-and-forward", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+  const dest = "0123456789abcdef0123456789abcdef";
+
+  await plugin.start({
+    messaging: { send_alerts: true },
+    crew: [{ name: "Alice", destination: dest }],
+    propagation: { enabled: true, node: PROP_NODE },
+  });
+  const router = plugin.lxmf;
+  // Mark the crew member's lxmf.delivery destination as unreachable.
+  plugin.rns.transport._unreachable.add(dest);
+
+  app._onDelta({
+    updates: [
+      {
+        values: [
+          {
+            path: "notifications.bilge",
+            value: { state: "alarm", message: "Bilge!" },
+          },
+        ],
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  // No known path -> the alert is submitted to the propagation node for
+  // store-and-forward delivery, and no direct packet is emitted.
+  assert.equal(router.sent.length, 0, "no direct send attempted");
+  assert.equal(router.submitted.length, 1, "submitted to the propagation node");
+  const { message } = router.submitted[0];
+  assert.deepEqual(message.options.destinationHash, Buffer.from(dest, "hex"));
+  assert.equal(message.options.title, "Signal K: bilge");
+  assert.equal(message.options.content, "Bilge!");
+
+  await plugin.stop();
+});
+
+test("alerts fall back to direct delivery when no propagation node is configured", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+  const dest = "0123456789abcdef0123456789abcdef";
+
+  await plugin.start({
+    messaging: { send_alerts: true },
+    crew: [{ name: "Alice", destination: dest }],
+  });
+  const router = plugin.lxmf;
+
+  app._onDelta({
+    updates: [
+      {
+        values: [
+          {
+            path: "notifications.bilge",
+            value: { state: "alarm", message: "Bilge!" },
+          },
+        ],
+      },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  // No propagation node -> plain direct delivery, regardless of reachability.
+  assert.equal(router.sent.length, 1);
+  assert.equal(router.submitted.length, 0);
+
+  await plugin.stop();
+});
+
+test("an announce from the configured propagation node is persisted", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  await plugin.start({
+    messaging: { display_name: "Boat" },
+    propagation: { enabled: true, node: PROP_NODE },
+  });
+  const rns = plugin.rns;
+
+  rns.transport.dispatchEvent(
+    new CustomEvent("announce", {
+      detail: {
+        destinationHash: Buffer.from(PROP_NODE, "hex"),
+        identity: { publicKey: new Uint8Array() },
+      },
+    }),
+  );
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(rns.persistor.storeCalls.length, 1);
+  assert.deepEqual(
+    rns.persistor.storeCalls[0].hash,
+    Buffer.from(PROP_NODE, "hex"),
+  );
+  assert.ok(
+    app.debugCalls.some((args) =>
+      /Persisted propagation node/.test(args.join(" ")),
+    ),
+  );
+
+  await plugin.stop();
 });
 
 // --- Telemetry broadcast (opt-in) ----------------------------------------

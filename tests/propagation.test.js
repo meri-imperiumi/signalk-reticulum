@@ -1,0 +1,327 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+
+const {
+  deps,
+  normalizeNodeHash,
+  configurePropagationNode,
+  syncFromNode,
+  makePropagationDeliverer,
+  makeAutoDeliverer,
+} = require("../plugin/propagation");
+
+const REAL_DEPS = { ...deps };
+
+/** A fake LXMRouter recording propagation client calls. */
+class FakeLxmRouter {
+  constructor() {
+    this.deliveryDest = {
+      destinationHash: new Uint8Array(16).fill(7),
+    };
+    this.propagationNodeCalls = [];
+    this.submitted = [];
+    this.syncCalls = 0;
+  }
+  setOutboundPropagationNode(hash) {
+    this.propagationNodeCalls.push(hash);
+  }
+  async submitToPropagationNode(message, identity) {
+    this.submitted.push({ message, identity });
+    return { transientId: new Uint8Array(16).fill(1), stampCost: 16 };
+  }
+  async syncFromPropagationNode(identity) {
+    this.syncCalls += 1;
+    return this.syncResult || { received: 0, duplicates: 0 };
+  }
+}
+
+/** A fake LXMessage that just records its constructor options. */
+class FakeLXMessage {
+  constructor(options) {
+    this.options = options;
+  }
+}
+
+// --- normalizeNodeHash ------------------------------------------------------
+
+test("normalizeNodeHash accepts a canonical hash", () => {
+  const hash = "0123456789abcdef0123456789abcdef";
+  assert.equal(normalizeNodeHash(hash), hash);
+});
+
+test("normalizeNodeHash trims, lower-cases and strips dashes/space", () => {
+  assert.equal(
+    normalizeNodeHash("  0123-4567-89AB-CDEF0123456789abcdef  "),
+    "0123456789abcdef0123456789abcdef",
+  );
+});
+
+test("normalizeNodeHash rejects non-strings, empty and bad-length values", () => {
+  assert.equal(normalizeNodeHash(undefined), "");
+  assert.equal(normalizeNodeHash(null), "");
+  assert.equal(normalizeNodeHash(123), "");
+  assert.equal(normalizeNodeHash(""), "");
+  assert.equal(normalizeNodeHash("tooshort"), "");
+  assert.equal(normalizeNodeHash("0123456789abcdef0123456789abcdeg"), "");
+});
+
+// --- configurePropagationNode ----------------------------------------------
+
+test("configurePropagationNode sets the outbound node and logs", () => {
+  const router = new FakeLxmRouter();
+  const logs = [];
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  const ok = configurePropagationNode(
+    router,
+    "0123456789abcdef0123456789abcdef",
+    (...a) => logs.push(a.join(" ")),
+  );
+
+  assert.equal(ok, true);
+  assert.equal(router.propagationNodeCalls.length, 1);
+  assert.deepEqual(
+    router.propagationNodeCalls[0],
+    Buffer.from("0123456789abcdef0123456789abcdef", "hex"),
+  );
+  assert.ok(logs.some((l) => /Configured LXMF propagation node/.test(l)));
+
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("configurePropagationNode is a no-op without a router or hash", () => {
+  assert.equal(
+    configurePropagationNode(null, "0123456789abcdef0123456789abcdef"),
+    false,
+  );
+  assert.equal(configurePropagationNode(new FakeLxmRouter(), ""), false);
+});
+
+test("configurePropagationNode logs and returns false when setOutboundPropagationNode throws", () => {
+  const router = new FakeLxmRouter();
+  router.setOutboundPropagationNode = () => {
+    throw new Error("nope");
+  };
+  const logs = [];
+  const ok = configurePropagationNode(
+    router,
+    "0123456789abcdef0123456789abcdef",
+    (...a) => logs.push(a.join(" ")),
+  );
+  assert.equal(ok, false);
+  assert.ok(logs.some((l) => /Failed to configure propagation node/.test(l)));
+});
+
+// --- syncFromNode -----------------------------------------------------------
+
+test("syncFromNode logs a receive count when messages arrive", async () => {
+  const router = new FakeLxmRouter();
+  router.syncResult = { received: 3, duplicates: 1 };
+  const logs = [];
+  const result = await syncFromNode(router, "IDENTITY", (...a) =>
+    logs.push(a.join(" ")),
+  );
+  assert.equal(router.syncCalls, 1);
+  assert.deepEqual(result, { received: 3, duplicates: 1 });
+  assert.ok(logs.some((l) => /received 3 message/.test(l)));
+  assert.ok(logs.some((l) => /1 duplicate/.test(l)));
+});
+
+test("syncFromNode stays quiet when nothing new arrived", async () => {
+  const router = new FakeLxmRouter();
+  router.syncResult = { received: 0, duplicates: 0 };
+  const logs = [];
+  await syncFromNode(router, "IDENTITY", (...a) => logs.push(a.join(" ")));
+  assert.equal(logs.length, 0, "no log line for an empty sync");
+});
+
+test("syncFromNode logs and returns zeros when the sync throws", async () => {
+  const router = new FakeLxmRouter();
+  router.syncFromPropagationNode = async () => {
+    throw new Error("node unreachable");
+  };
+  const logs = [];
+  const result = await syncFromNode(router, "IDENTITY", (...a) =>
+    logs.push(a.join(" ")),
+  );
+  assert.deepEqual(result, { received: 0, duplicates: 0 });
+  assert.ok(logs.some((l) => /propagation sync failed/.test(l)));
+});
+
+// --- makePropagationDeliverer ----------------------------------------------
+
+test("makePropagationDeliverer builds and submits an LXMessage", async () => {
+  const router = new FakeLxmRouter();
+  const identity = { id: "me" };
+  deps.LXMessage = FakeLXMessage;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+  deps.toHex = (bytes) => Buffer.from(bytes).toString("hex");
+
+  const deliver = makePropagationDeliverer(router, identity);
+  await deliver("0123456789abcdef0123456789abcdef", "Title", "Body");
+
+  assert.equal(router.submitted.length, 1);
+  const { message, identity: sentIdentity } = router.submitted[0];
+  assert.equal(sentIdentity, identity);
+  assert.deepEqual(message.options, {
+    sourceHash: router.deliveryDest.destinationHash,
+    destinationHash: Buffer.from("0123456789abcdef0123456789abcdef", "hex"),
+    title: "Title",
+    content: "Body",
+  });
+
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("makePropagationDeliverer ignores the arrival link id", async () => {
+  const router = new FakeLxmRouter();
+  deps.LXMessage = FakeLXMessage;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  const deliver = makePropagationDeliverer(router, {});
+  await deliver(
+    "0123456789abcdef0123456789abcdef",
+    "",
+    "Pong",
+    new Uint8Array(8).fill(2),
+  );
+
+  // The submit payload carries no link id — a propagated message always
+  // travels over a fresh link to the propagation node.
+  assert.equal(router.submitted.length, 1);
+  assert.deepEqual(router.submitted[0].message.options, {
+    sourceHash: router.deliveryDest.destinationHash,
+    destinationHash: Buffer.from("0123456789abcdef0123456789abcdef", "hex"),
+    title: "",
+    content: "Pong",
+  });
+
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("makePropagationDeliverer logs the stamp cost on success", async () => {
+  const router = new FakeLxmRouter();
+  const logs = [];
+  deps.LXMessage = FakeLXMessage;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  const deliver = makePropagationDeliverer(router, {}, (...a) =>
+    logs.push(a.join(" ")),
+  );
+  await deliver("0123456789abcdef0123456789abcdef", "t", "c");
+
+  assert.ok(
+    logs.some((l) => /stamp cost 16/.test(l)),
+    "the node's advertised stamp cost is logged",
+  );
+
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("makePropagationDeliverer propagates submit errors", async () => {
+  const router = new FakeLxmRouter();
+  router.submitToPropagationNode = async () => {
+    throw new Error("node unreachable");
+  };
+  deps.LXMessage = FakeLXMessage;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  const deliver = makePropagationDeliverer(router, {});
+  await assert.rejects(
+    () => deliver("0123456789abcdef0123456789abcdef", "t", "c"),
+    /node unreachable/,
+  );
+
+  Object.assign(deps, REAL_DEPS);
+});
+
+// --- makeAutoDeliverer ------------------------------------------------------
+
+/** Records calls as the direct deliverer. */
+function recordingDeliverer() {
+  const calls = [];
+  const fn = async (destinationHashHex, title, content, linkId) => {
+    calls.push({ destinationHashHex, title, content, linkId, via: "direct" });
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test("makeAutoDeliverer sends directly when the recipient is reachable", async () => {
+  const direct = recordingDeliverer();
+  const propagation = recordingDeliverer();
+  propagation.calls = []; // separate bucket
+  const hasPath = (hash) =>
+    Buffer.from(hash).toString("hex") === "0123456789abcdef0123456789abcdef";
+  const deliver = makeAutoDeliverer({
+    directDeliver: direct,
+    propagationDeliver: propagation,
+    hasPath,
+    fromHex: (hex) => Buffer.from(hex, "hex"),
+  });
+
+  await deliver("0123456789abcdef0123456789abcdef", "t", "c");
+
+  assert.equal(direct.calls.length, 1, "direct deliverer used");
+  assert.equal(propagation.calls.length, 0, "propagation not used");
+});
+
+test("makeAutoDeliverer falls back to propagation when no path is known", async () => {
+  const direct = recordingDeliverer();
+  const propagation = recordingDeliverer();
+  const logs = [];
+  const hasPath = () => false; // recipient unreachable
+  const deliver = makeAutoDeliverer({
+    directDeliver: direct,
+    propagationDeliver: propagation,
+    hasPath,
+    fromHex: (hex) => Buffer.from(hex, "hex"),
+    debug: (msg) => logs.push(msg),
+  });
+
+  await deliver("0123456789abcdef0123456789abcdef", "t", "c");
+
+  assert.equal(direct.calls.length, 0, "direct delivery skipped");
+  assert.equal(propagation.calls.length, 1, "propagation fallback used");
+  assert.deepEqual(
+    propagation.calls[0].destinationHashHex,
+    "0123456789abcdef0123456789abcdef",
+  );
+  assert.ok(
+    logs.some((l) => /falling back to store-and-forward/.test(l)),
+    "fallback logged",
+  );
+});
+
+test("makeAutoDeliverer forwards the arrival link id to the direct deliverer", async () => {
+  const direct = recordingDeliverer();
+  const propagation = recordingDeliverer();
+  const linkId = new Uint8Array(8).fill(3);
+  const deliver = makeAutoDeliverer({
+    directDeliver: direct,
+    propagationDeliver: propagation,
+    hasPath: () => true,
+    fromHex: (hex) => Buffer.from(hex, "hex"),
+  });
+
+  await deliver("0123456789abcdef0123456789abcdef", "", "Pong", linkId);
+
+  assert.equal(direct.calls[0].linkId, linkId, "link id forwarded when direct");
+});
+
+test("makeAutoDeliverer always uses direct delivery when no path check is given", async () => {
+  const direct = recordingDeliverer();
+  const propagation = recordingDeliverer();
+  const deliver = makeAutoDeliverer({
+    directDeliver: direct,
+    propagationDeliver: propagation,
+    // no hasPath
+    fromHex: (hex) => Buffer.from(hex, "hex"),
+  });
+
+  await deliver("0123456789abcdef0123456789abcdef", "t", "c");
+  await deliver("fedcba9876543210fedcba9876543210", "t", "c");
+
+  assert.equal(direct.calls.length, 2, "direct used for both");
+  assert.equal(propagation.calls.length, 0, "no fallback without a path check");
+});
