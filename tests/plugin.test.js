@@ -10,6 +10,7 @@ const makePlugin = require("../plugin/index.js");
 const messaging = require("../plugin/messaging");
 const nomadnet = require("../plugin/nomadnet");
 const compression = require("../plugin/compression");
+const rfed = require("../plugin/rfed");
 const {
   buildTelemetrySensors,
   packTelemetry,
@@ -409,6 +410,7 @@ test("schema exposes identity and interface groups with the AutoInterface defaul
     "propagation",
     "nomadnet",
     "telemetry",
+    "rfed",
     "appearance",
   ]);
   const identity = schema.properties.identity;
@@ -2018,3 +2020,231 @@ test("stop flushes the persistence layer", async () => {
 
   assert.equal(rns.persistor.flushCalls, 1);
 });
+
+// --- RFed ship-to-ship telemetry -------------------------------------------
+
+/** A destination hash used across the RFed integration tests. */
+const RFED_NODE = "cd".repeat(16);
+
+/**
+ * A minimal RFedClient fake: records listen/subscribe/publish calls and lets a
+ * test deliver a decoded fanout message to the onMessage callback handed to
+ * `listen`. The constructor signature mirrors the real client.
+ */
+class FakeRFedClient {
+  constructor({ identity, rns }) {
+    this.identity = identity;
+    this.rns = rns;
+    FakeRFedClient.instances.push(this);
+  }
+  async listen(onMessage) {
+    this.onMessage = onMessage;
+    this.listenCalls = (this.listenCalls || 0) + 1;
+    return Buffer.from("11".repeat(16), "hex");
+  }
+  async subscribe(nodeHash, channel) {
+    this.subscribeCalls = this.subscribeCalls || [];
+    this.subscribeCalls.push({ nodeHash, channel });
+    return { ok: true, stampCost: 0 };
+  }
+  async publish(nodeHash, channel, message) {
+    this.publishCalls = this.publishCalls || [];
+    this.publishCalls.push({ nodeHash, channel, message });
+  }
+}
+FakeRFedClient.instances = [];
+
+/** Replaces (and restores) the RFedClient class used by the rfed module. */
+function withFakeRFedClient(fn) {
+  return async () => {
+    const real = rfed.deps.RFedClient;
+    FakeRFedClient.instances.length = 0;
+    rfed.deps.RFedClient = FakeRFedClient;
+    try {
+      await fn();
+    } finally {
+      rfed.deps.RFedClient = real;
+    }
+  };
+}
+
+test("schema exposes an opt-in rfed configuration group", () => {
+  const group = makePlugin(makeApp()).schema().properties.rfed;
+  assert.ok(group);
+  assert.equal(group.properties.enabled.default, false);
+  assert.equal(group.properties.transmit_telemetry.default, false);
+  assert.equal(group.properties.receive_telemetry.default, false);
+  assert.equal(group.properties.channel.default, "public.signalk.vessels");
+  assert.equal(group.properties.interval_seconds.default, 300);
+  assert.equal(group.properties.node.pattern, "^[0-9a-fA-F]{32}$");
+  assert.equal(group.additionalProperties, false);
+});
+
+test(
+  "start brings up the RFed client when enabled with a valid node",
+  withFakeRFedClient(async () => {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    await plugin.start({
+      messaging: { display_name: "Boat" },
+      rfed: {
+        enabled: true,
+        node: RFED_NODE,
+        channel: "public.signalk.vessels",
+        transmit_telemetry: false,
+        receive_telemetry: true,
+      },
+    });
+    assert.equal(FakeRFedClient.instances.length, 1);
+    const client = FakeRFedClient.instances[0];
+    assert.equal(client.listenCalls, 1);
+    assert.ok(client.subscribeCalls.length >= 1);
+    assert.equal(client.subscribeCalls[0].channel, "public.signalk.vessels");
+    assert.ok(
+      app.debugCalls.some((args) =>
+        /Announced rfed\.delivery destination/.test(args.join(" ")),
+      ),
+    );
+    await plugin.stop();
+  }),
+);
+
+test(
+  "start ignores RFed when enabled but no valid node hash is configured",
+  withFakeRFedClient(async () => {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    await plugin.start({
+      rfed: { enabled: true, node: "not-a-hash" },
+    });
+    assert.equal(FakeRFedClient.instances.length, 0);
+    assert.ok(
+      app.debugCalls.some((args) =>
+        /no valid node destination hash/.test(args.join(" ")),
+      ),
+    );
+    await plugin.stop();
+  }),
+);
+
+test(
+  "start publishes own telemetry to the channel when transmit is enabled",
+  withFakeRFedClient(async () => {
+    const app = makeApp();
+    // Give the boat some data to broadcast.
+    app.getSelfPath = (path) => {
+      if (path === "name") return "Meri Imperiumi";
+      if (path === "mmsi") return "230001234";
+      if (path === "navigation.position")
+        return { value: { latitude: 60.1, longitude: 21.1 } };
+      if (path === "navigation.speedOverGround") return { value: 5 };
+      return undefined;
+    };
+    const plugin = makePlugin(app);
+
+    // Capture timers so the initial publish (a 5s timeout) can be driven
+    // without actually waiting.
+    const timeouts = [];
+    const origSetTimeout = globalThis.setTimeout;
+    const origSetInterval = globalThis.setInterval;
+    globalThis.setTimeout = (fn, ms) => {
+      timeouts.push({ fn, ms });
+      return 0;
+    };
+    globalThis.setInterval = (fn, ms) => {
+      timeouts.push({ fn, ms, interval: true });
+      return 0;
+    };
+    try {
+      await plugin.start({
+        messaging: { display_name: "Boat" },
+        rfed: {
+          enabled: true,
+          node: RFED_NODE,
+          transmit_telemetry: true,
+          receive_telemetry: false,
+          interval_seconds: 300,
+        },
+      });
+      const client = plugin.rfed;
+      assert.ok(client, "rfed client brought up");
+      // Fire the initial publish timeout (5s) manually.
+      await Promise.all(
+        timeouts.filter((t) => !t.interval && t.ms === 5000).map((t) => t.fn()),
+      );
+      assert.ok(
+        client.publishCalls && client.publishCalls.length >= 1,
+        "at least one snapshot published",
+      );
+      const { nodeHash, channel, message } = client.publishCalls[0];
+      assert.deepEqual([...nodeHash], [...Buffer.from(RFED_NODE, "hex")]);
+      assert.equal(channel, "public.signalk.vessels");
+      assert.ok(message.fields instanceof Map);
+      assert.ok(message.fields.has(FIELD_TELEMETRY));
+    } finally {
+      globalThis.setTimeout = origSetTimeout;
+      globalThis.setInterval = origSetInterval;
+      await plugin.stop();
+    }
+  }),
+);
+
+test(
+  "received RFed telemetry populates Signal K under the sender's MMSI context",
+  withFakeRFedClient(async () => {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    await plugin.start({
+      messaging: { display_name: "Boat" },
+      rfed: {
+        enabled: true,
+        node: RFED_NODE,
+        transmit_telemetry: false,
+        receive_telemetry: true,
+      },
+    });
+    const client = plugin.rfed;
+    assert.ok(client, "rfed client brought up");
+    // Build a foreign vessel snapshot and deliver it as a fanout message.
+    const { Identity } = require("@reticulum/core");
+    const { encodeShipTelemetry } = rfed;
+    const sender = await Identity.generate();
+    const packed = encodeShipTelemetry({
+      now: Math.floor(Date.now() / 1000),
+      name: "Other Boat",
+      mmsi: "230009999",
+      latitude: 59.9,
+      longitude: 20.5,
+      sog: 3,
+    });
+    client.onMessage({
+      message: {
+        timestamp: Math.floor(Date.now() / 1000),
+        fields: new Map([[FIELD_TELEMETRY, packed]]),
+      },
+      senderIdentity: sender,
+      sourceHash: Buffer.from("ff".repeat(16), "hex"),
+      signatureValid: true,
+    });
+    assert.ok(
+      app.messages.some(
+        (m) =>
+          m.id === "signalk-reticulum" &&
+          m.delta.context === "vessels.urn:mrn:imo:mmsi:230009999",
+      ),
+      "telemetry populated under the sender's MMSI context",
+    );
+    await plugin.stop();
+  }),
+);
+
+test(
+  "start does not bring up RFed when disabled",
+  withFakeRFedClient(async () => {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    await plugin.start({ rfed: { enabled: false, node: RFED_NODE } });
+    assert.equal(FakeRFedClient.instances.length, 0);
+    await plugin.stop();
+  }),
+);

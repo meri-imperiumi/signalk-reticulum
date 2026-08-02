@@ -47,6 +47,13 @@ const {
   handleInboundTelemetry,
   sendInboundTelemetryMeta,
 } = require("./inbound");
+const {
+  effectiveChannel,
+  encodeShipTelemetry,
+  makeShipTelemetryPublisher,
+  setupRFed,
+  handleInboundShipTelemetry,
+} = require("./rfed");
 const commands = require("./commands");
 
 /**
@@ -145,6 +152,104 @@ function buildSnapshot(app) {
   };
 
   return packTelemetry(buildTelemetrySensors(readings), readings.now);
+}
+
+/**
+ * Unwraps a `design.aisShipType` value (an `{id, name}` object, possibly
+ * `{value}`-wrapped) down to its numeric AIS ship-type id, or `undefined`.
+ *
+ * @param {unknown} value
+ * @returns {number|undefined}
+ */
+function readAisShipType(value) {
+  let v = value;
+  for (let i = 0; i < 4 && v && typeof v === "object"; i++) {
+    if ("id" in v) {
+      v = v.id;
+      break;
+    }
+    if ("value" in v) {
+      v = v.value;
+      continue;
+    }
+    break;
+  }
+  return typeof v === "number" && Number.isFinite(v)
+    ? Math.trunc(v)
+    : undefined;
+}
+
+/**
+ * Unwraps a `navigation.destination` value (a plain string, a `{commonName}`
+ * object, or a `{value}`-wrapped variant of either) down to its text, or
+ * `undefined` when empty.
+ *
+ * @param {unknown} value
+ * @returns {string|undefined}
+ */
+function readDestination(value) {
+  let v = value;
+  for (let i = 0; i < 4 && v && typeof v === "object"; i++) {
+    if ("commonName" in v) {
+      v = v.commonName;
+      break;
+    }
+    if ("value" in v) {
+      v = v.value;
+      continue;
+    }
+    break;
+  }
+  const s = readString(v);
+  return s || undefined;
+}
+
+/**
+ * Reads the boat's own vessel telemetry from Signal K and returns the
+ * normalised readings object consumed by {@link encodeShipTelemetry} for the
+ * RFed ship-to-ship channel broadcast.
+ *
+ * The snapshot mirrors what AIS broadcasts — static vessel info (name, MMSI,
+ * callsign, ship type, draft, length, beam, destination) and the dynamic
+ * navigation state (position, SOG, COG, true heading, navigation state) — plus
+ * basic weather (true wind, barometric pressure, outside temperature and
+ * humidity). All values are returned in Signal K canonical units (decimal
+ * degrees, m/s, rad, Pa, K, ratio, metres) so the encoder ships them on the
+ * wire unchanged. Absent readings are simply omitted.
+ *
+ * @param {{getSelfPath?: (path: string) => unknown}|undefined} app
+ * @returns {object}
+ */
+function buildShipReadings(app) {
+  const position = readPosition(readSelf(app, "navigation.position"));
+  // Prefer true wind speed; fall back to speed over ground when no true-wind
+  // instrument is fitted (e.g. a GPS-only source).
+  const windSpeed =
+    readNumber(readSelf(app, "environment.wind.speedTrue")) ??
+    readNumber(readSelf(app, "environment.wind.speedOverGround"));
+  return {
+    now: Math.floor(Date.now() / 1000),
+    name: readString(readSelf(app, "name")) || undefined,
+    mmsi: readString(readSelf(app, "mmsi")) || undefined,
+    callsign:
+      readString(readSelf(app, "communication.callsignVhf")) || undefined,
+    shipType: readAisShipType(readSelf(app, "design.aisShipType")),
+    destination: readDestination(readSelf(app, "navigation.destination")),
+    draft: readNumber(readSelf(app, "design.draft.maximum")),
+    length: readNumber(readSelf(app, "design.length.overall")),
+    beam: readNumber(readSelf(app, "design.beam")),
+    latitude: position && position.latitude,
+    longitude: position && position.longitude,
+    sog: readNumber(readSelf(app, "navigation.speedOverGround")),
+    cog: readNumber(readSelf(app, "navigation.courseOverGroundTrue")),
+    heading: readNumber(readSelf(app, "navigation.headingTrue")),
+    status: readString(readSelf(app, "navigation.state")) || undefined,
+    windSpeed,
+    windDir: readNumber(readSelf(app, "environment.wind.directionTrue")),
+    pressure: readNumber(readSelf(app, "environment.outside.pressure")),
+    temp: readNumber(readSelf(app, "environment.outside.temperature")),
+    humidity: readNumber(readSelf(app, "environment.outside.relativeHumidity")),
+  };
 }
 
 /**
@@ -313,6 +418,11 @@ module.exports = (app) => {
      * later steps can extend the served page with live telemetry.
      */
     nomadnet: undefined,
+    /**
+     * The RFed channel client (available after start when enabled). Exposed so
+     * inbound fanout messages can be inspected / driven in tests.
+     */
+    rfed: undefined,
 
     /**
      * Resolves (or generates) the identity, brings up the Reticulum node and
@@ -327,6 +437,7 @@ module.exports = (app) => {
       plugin.interfaces = [];
       plugin.lxmf = undefined;
       plugin.nomadnet = undefined;
+      plugin.rfed = undefined;
 
       let resolved;
       try {
@@ -747,6 +858,97 @@ module.exports = (app) => {
           });
         }
 
+        // Optionally bring up an RFed (Reticulum Federation) channel client
+        // for ship-to-ship telemetry — many-to-many messaging over a
+        // federation node. Each boat publishes its own AIS-like snapshot
+        // (static vessel info + dynamic navigation + basic weather) to a
+        // channel, and received boats are populated as Signal K vessel
+        // targets. Transmit and receive are independent opt-ins. RFed runs on
+        // its own `rfed.delivery` destination (separate from the LXMF
+        // router), so it works whether or not messaging came up.
+        if (config && config.rfed && config.rfed.enabled) {
+          const rfedNodeHex = normalizeNodeHash(config.rfed.node);
+          const rfedChannel = effectiveChannel(config.rfed.channel);
+          const rfedTransmit = !!config.rfed.transmit_telemetry;
+          const rfedReceive = !!config.rfed.receive_telemetry;
+          const selfIdentityHashHex = toHex(plugin.identity.identityHash);
+          const selfMmsi = readString(readSelf(app, "mmsi"));
+          if (!rfedNodeHex) {
+            app.debug(
+              "RFed enabled but no valid node destination hash configured",
+            );
+          } else {
+            try {
+              // Skip our own published echo so we do not create a duplicate
+              // vessel target of ourselves on the chart. The strict
+              // vessels.self guarantee is enforced inside the handler, but
+              // short-circuiting here avoids the decode work and log noise.
+              const onRFedMessage = (decoded) => {
+                if (!rfedReceive) {
+                  return;
+                }
+                try {
+                  handleInboundShipTelemetry(
+                    decoded,
+                    config,
+                    app,
+                    selfIdentityHashHex,
+                    selfMmsi,
+                  );
+                } catch (e) {
+                  app.debug(`RFed inbound error: ${e.message}`);
+                }
+              };
+              const rfedSetup = await setupRFed(
+                rns,
+                plugin.identity,
+                { nodeHashHex: rfedNodeHex, channel: rfedChannel },
+                onRFedMessage,
+                app.debug,
+              );
+              unsubscribes.push(rfedSetup.teardown);
+              plugin.rfed = rfedSetup.client;
+
+              // Transmit: publish a vessel snapshot to the channel on the
+              // configured interval (one shortly after start so peers see us
+              // without waiting a full interval).
+              if (rfedTransmit) {
+                const publishShip = makeShipTelemetryPublisher(
+                  rfedSetup.client,
+                  rfedNodeHex,
+                  rfedChannel,
+                );
+                const rawInterval = Number(config.rfed.interval_seconds);
+                const rfedIntervalSec =
+                  Number.isFinite(rawInterval) && rawInterval > 0
+                    ? Math.max(30, rawInterval)
+                    : 300;
+                const sendShipOnce = () => {
+                  try {
+                    const packed = encodeShipTelemetry(buildShipReadings(app));
+                    if (!packed) {
+                      return;
+                    }
+                    publishShip(packed).catch((e) =>
+                      app.debug(`RFed publish error: ${e.message}`),
+                    );
+                  } catch (e) {
+                    app.debug(`RFed snapshot error: ${e.message}`);
+                  }
+                };
+                const initial = setTimeout(sendShipOnce, 5000);
+                const timer = setInterval(sendShipOnce, rfedIntervalSec * 1000);
+                unsubscribes.push(() => {
+                  clearTimeout(initial);
+                  clearInterval(timer);
+                });
+              }
+            } catch (e) {
+              app.debug(`RFed setup error: ${e.message}`);
+            }
+          }
+        }
+
         // Optionally bring up a NomadNet site so the boat can serve pages on
         // the mesh. Opt-in: nothing is announced or served unless enabled.
         if (config && config.nomadnet && config.nomadnet.enabled) {
@@ -965,6 +1167,7 @@ module.exports = (app) => {
       }
       plugin.lxmf = undefined;
       plugin.nomadnet = undefined;
+      plugin.rfed = undefined;
       plugin.identity = undefined;
       plugin.rns = undefined;
       plugin.interfaces = [];
@@ -981,6 +1184,7 @@ module.exports.deps = deps;
 // Exposed for tests so the telemetry snapshot/broadcast can be exercised
 // without bringing up the full Reticulum stack.
 module.exports.buildSnapshot = buildSnapshot;
+module.exports.buildShipReadings = buildShipReadings;
 module.exports.sendTelemetryToCrew = sendTelemetryToCrew;
 // Exposed for tests so the connectivity-trigger path/value helpers can be
 // exercised in isolation.

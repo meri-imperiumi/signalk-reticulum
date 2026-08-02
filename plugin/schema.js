@@ -461,6 +461,98 @@ function buildPluginSchema(interfaces) {
         },
         additionalProperties: false,
       },
+      rfed: {
+        type: "object",
+        title: "RFed ship-to-ship telemetry",
+        description:
+          "Share and receive vessel telemetry with other Signal K boats over " +
+          "an RFed (Reticulum Federation) channel — many-to-many messaging " +
+          "relayed by a federation node. Each boat publishes its own AIS-like " +
+          "snapshot (static vessel info, dynamic position/SOG/COG/heading and " +
+          "basic weather) to a channel, and received boats are populated as " +
+          "Signal K vessel targets so they show up on charts and instrument " +
+          "panels like AIS targets. Transmit and receive are independent " +
+          "opt-ins. RFed is a separate protocol from the Sideband/Columba crew " +
+          "messaging: run an rfed federation node and enter any of its rfed.* " +
+          "destination hashes below. The snapshot uses a custom versioned " +
+          "format (both ends are Signal K nodes), not Sideband's packed " +
+          "telemetry, and is carried in the LXMF FIELD_TELEMETRY field.",
+        properties: {
+          enabled: {
+            type: "boolean",
+            title: "Enable RFed",
+            description:
+              "Master switch for the RFed channel client. When off, no " +
+              "destination is brought up and nothing is subscribed, published " +
+              "or received. Off by default.",
+            default: false,
+          },
+          node: {
+            type: "string",
+            title: "RFed node destination hash",
+            description:
+              "Any 32-character hexadecimal rfed.* destination hash of the " +
+              "rfed federation node to subscribe to and publish through (they " +
+              "all share one identity). Find it from the federation node's " +
+              "announce.",
+            default: "",
+            pattern: "^[0-9a-fA-F]{32}$",
+            minLength: 32,
+            maxLength: 32,
+          },
+          channel: {
+            type: "string",
+            title: "Channel name",
+            description:
+              "The rfed channel name to subscribe to and publish on. The RFed " +
+              "spec recommends public channels be prefixed 'public.'; the " +
+              "default public 'public.signalk.vessels' channel lets boats " +
+              "discover each other out of the box. Set a custom name (e.g. a " +
+              "'<hex>.fleet' private channel) to restrict the exchange to a " +
+              "known group.",
+            default: "public.signalk.vessels",
+          },
+          transmit_telemetry: {
+            type: "boolean",
+            title: "Transmit own telemetry to the channel",
+            description:
+              "When enabled, the node's vessel snapshot (static AIS-like info, " +
+              "dynamic navigation and basic weather) is published to the " +
+              "channel shortly after start and then on the interval below. " +
+              "Requires a valid node destination hash. Off by default.",
+            default: false,
+          },
+          receive_telemetry: {
+            type: "boolean",
+            title: "Populate Signal K from received vessel telemetry",
+            description:
+              "When enabled, a vessel snapshot received from any other " +
+              "signed publisher on the channel is written into Signal K under " +
+              "a per-vessel context (vessels.urn:reticulum:identity:<hash>), " +
+              "so nearby boats show up as vessel targets on charts and " +
+              "instrument panels. Unsigned/forged messages are dropped, and " +
+              "the node's own echo is ignored, so received RFed telemetry only " +
+              "ever updates other vessels — never vessels.self. The update is " +
+              "timestamped with the message's own send time, so a stale " +
+              "store-and-forward snapshot never overrides a fresher reading " +
+              "(e.g. real AIS). Off by default.",
+            default: false,
+          },
+          interval_seconds: {
+            type: "number",
+            title: "Transmit interval (seconds)",
+            description:
+              "How often to re-publish the vessel snapshot to the channel. " +
+              "Clamped to a 30-second minimum to avoid flooding the mesh. " +
+              "Choose with the mesh bandwidth in mind — each publish is " +
+              "relayed to every subscriber by the federation node. Defaults " +
+              "to 300 seconds.",
+            default: 300,
+            minimum: 30,
+          },
+        },
+        additionalProperties: false,
+      },
       appearance: {
         type: "object",
         title: "Appearance",

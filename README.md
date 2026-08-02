@@ -14,6 +14,7 @@ This plugin connects the [Signal K](https://signalk.org/) marine platform with t
 - **Incoming commands** — the node receives LXMF messages and answers text commands from any peer, starting with `ping` (replies `pong`).
 - **Store-and-forward** — when an LXMF propagation node is configured, the node periodically pulls messages held for it while it was offline, and forwards alerts to a crew member it can't reach directly to the node for store-and-forward delivery instead of dropping them.
 - **NomadNet site** — the plugin serves a NomadNet site showing the basic vessel state
+- **Telemetry exchange** — broadcast the boat's own telemetry to the crew (and populate Signal K from crew-device telemetry), and exchange AIS-like vessel telemetry with other boats over an RFed channel so these vessels show up as targets on charts.
 - **Connectivity-change re-announce** — when a connectivity indicator changes (Starlink dropping, an LTE modem switching cells, …) the node immediately re-announces its destinations so clients rediscover the boat over a working, non-internet mesh path without waiting for the next interval.
 
 ## Configuration
@@ -66,6 +67,24 @@ The **Re-announce interval (minutes)** setting (under **Re-announces**) controls
 Beyond the periodic cadence, the node re-announces its destinations the moment a connectivity indicator changes, so clients switch over to a still-working mesh path without waiting for the next interval. The boat's *internet* connectivity (Starlink, an LTE modem, …) may come and go, but the Reticulum mesh paths (radio, serial, LAN peering) are unaffected — a fresh announce lets clients discover and use them right away.
 
 The **Connectivity-change trigger paths** list (under **Re-announces**) holds the Signal K paths to watch for value changes. It defaults to the Starlink provider status path (`network.providers.starlink.status`, supplied by the `signalk-starlink` plugin) and the LTE operator-name path (`networking.lte.registerNetworkDisplay`, which changes on a roam or registration) and supports multiple providers — add any others you have. Subscribing to a path the server never publishes is harmless, so the defaults are safe to leave on even without that connectivity source. Only real value transitions fire a re-announce (a provider re-publishing the same `online` state, or the same operator name, is ignored); clear the list to disable.
+
+### Telemetry
+
+Under **Telemetry** the node can exchange telemetry with the crew's handheld devices (Sideband, NomadNet, MeshChat):
+
+- **Broadcast own telemetry to the crew** — the node's position/SOG/COG, house battery state of charge and depth/tide/wind/anchor readings are sent to each crew member as a Sideband-compatible snapshot on the configured interval, so crew see the boat in their peer telemetry view.
+- **Populate Signal K from crew telemetry** — a snapshot a crew member's device sends back is decoded into Signal K under a per-crew vessel context (`vessels.urn:reticulum:identity:<hash>`), so a crew member or a dinghy tracker shows up as a vessel target on charts and instrument panels, much like an AIS target.
+
+### RFed ship-to-ship telemetry
+
+Under **RFed ship-to-ship telemetry** the node can exchange vessel telemetry *with other boats* over an RFed (Reticulum Federation) channel — many-to-many messaging relayed by a federation node. This is distinct from the one-to-one crew messaging above: every publishing boat on the channel hears every other. Run an rfed federation node (e.g. the Rust `rfed` reference) and enter any of its `rfed.*` destination hashes, then pick a channel (the default `public.signalk.vessels` lets boats discover each other out of the box; the RFed spec recommends public channels be `public.`-prefixed). Transmit and receive are independent opt-ins.
+
+The snapshot carries roughly what AIS broadcasts plus basic weather — static vessel info (name, MMSI, callsign, AIS ship type, draft, length, beam, destination), dynamic navigation (position, SOG, COG, true heading, navigation state) and weather (true wind, barometric pressure, outside temperature, humidity) — in Signal K canonical units. Received boats are populated as vessel targets under `vessels.urn:mrn:imo:mmsi:<MMSI>` (Signal K's standard AIS vessel URN, so a boat heard over the mesh merges with its real AIS target), falling back to `vessels.urn:reticulum:identity:<hash>` when a publisher has no MMSI.
+
+Safety guarantees:
+
+- Received RFed telemetry can **only** ever update *other* vessels — never `vessels.self`. The node's own echo is dropped, a *different* publisher claiming our own MMSI is dropped and **logged at error level with the offender's identity** (so a spoof/collision is visible), and unsigned/forged messages are dropped outright.
+- Each received update is **timestamped with the message's own send time**, so a stale snapshot that spent hours crossing the mesh through store-and-forward never overrides a fresher reading (e.g. real AIS).
 
 ## How alerting works
 
