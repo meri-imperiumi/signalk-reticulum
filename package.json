@@ -1,7 +1,7 @@
 {
   "name": "@meri-imperiumi/signalk-reticulum",
   "version": "0.2.3",
-  "description": "Signal K integration with the Reticulum network",
+  "description": "Signal K integration with the Reticulum mesh network",
   "main": "plugin/index.js",
   "scripts": {
     "lint": "npx @biomejs/biome check --use-editorconfig=true plugin/",
