@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 
 const { commands, isFromCrew, handleMessage } = require("../plugin/commands");
 const ping = require("../plugin/commands/ping");
+const { fromHex } = require("@reticulum/core");
+const { deriveLxmfDestinationHash } = require("../plugin/identity");
 
 const SOURCE = new Uint8Array(16).fill(5);
 const SOURCE_HEX = Buffer.from(SOURCE).toString("hex");
@@ -77,6 +79,26 @@ test("isFromCrew returns false for unknown senders", () => {
   const other = new Uint8Array(16).fill(1);
   const settings = { crew: [{ name: "Alice", destination: SOURCE_HEX }] };
   assert.equal(isFromCrew(makeMessage("ping", other), settings), false);
+});
+
+test("isFromCrew matches a crew member configured by identity hash via the derived lxmf.delivery hash", () => {
+  // The crew member is configured by their protocol-agnostic Reticulum
+  // identity hash; the inbound LXMF message's sourceHash is the sender's
+  // lxmf.delivery destination hash (what travels on the wire). isFromCrew
+  // derives the destination hash from the configured identity and compares.
+  const identityHash = "7a3c9f1b2e4d58607a3c9f1b2e4d5860";
+  const derivedLxmfHash = deriveLxmfDestinationHash(identityHash);
+  const settings = { crew: [{ name: "Alice", identity: identityHash }] };
+  assert.equal(
+    isFromCrew(makeMessage("ping", fromHex(derivedLxmfHash)), settings),
+    true,
+  );
+  // The raw identity hash itself is NOT what arrives on the wire, so a
+  // message sourced from the identity hash must not match.
+  assert.equal(
+    isFromCrew(makeMessage("ping", fromHex(identityHash)), settings),
+    false,
+  );
 });
 
 test("isFromCrew returns false when no crew is configured", () => {

@@ -604,9 +604,11 @@ test("schema exposes messaging and crew configuration groups", () => {
 
   const crewGroup = schema.properties.crew;
   assert.equal(crewGroup.type, "array");
-  assert.deepEqual(crewGroup.items.required, ["name", "destination"]);
+  // Crew members are configured by their protocol-agnostic Reticulum identity
+  // hash; the lxmf.delivery destination hash is derived from it.
+  assert.deepEqual(crewGroup.items.required, ["name", "identity"]);
   assert.equal(
-    crewGroup.items.properties.destination.pattern,
+    crewGroup.items.properties.identity.pattern,
     "^[0-9a-fA-F]{32}$",
   );
 });

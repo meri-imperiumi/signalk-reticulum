@@ -1,13 +1,19 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { Identity, toHex } = require("@reticulum/core");
+const { Identity, Destination, DestType, toHex } = require("@reticulum/core");
 const {
   resolveIdentity,
   normalizeHex,
   parseHexKey,
+  deriveDestinationHash,
+  deriveLxmfDestinationHash,
+  deriveNomadNetworkDestinationHash,
+  LXMF_DELIVERY_APP_NAME,
+  NOMADNETWORK_NODE_APP_NAME,
   PRIVATE_KEY_BYTES,
   PUBLIC_KEY_BYTES,
+  HASH_BYTES,
 } = require("../plugin/identity");
 
 test("resolveIdentity generates a new identity when no private key is configured", async () => {
@@ -106,4 +112,83 @@ test("parseHexKey enforces the expected byte length", () => {
   const ok = "ab".repeat(PUBLIC_KEY_BYTES);
   const bytes = parseHexKey(ok, PUBLIC_KEY_BYTES, "Public key");
   assert.equal(bytes.length, PUBLIC_KEY_BYTES);
+});
+
+test("deriveLxmfDestinationHash matches the stack's lxmf.delivery destination hash", async () => {
+  const identity = await Identity.generate();
+  const identityHashHex = toHex(identity.identityHash);
+
+  // What @reticulum/core computes for the lxmf.delivery SINGLE destination.
+  const dest = await Destination.OUT(
+    LXMF_DELIVERY_APP_NAME,
+    DestType.SINGLE,
+    identity,
+    null,
+  );
+
+  assert.equal(
+    deriveLxmfDestinationHash(identityHashHex),
+    toHex(dest.destinationHash),
+  );
+  // Accepts raw bytes too.
+  assert.equal(
+    deriveLxmfDestinationHash(identity.identityHash),
+    toHex(dest.destinationHash),
+  );
+  // 16 bytes / 32 hex chars, lowercase.
+  assert.equal(
+    deriveLxmfDestinationHash(identityHashHex).length,
+    HASH_BYTES * 2,
+  );
+  assert.match(deriveLxmfDestinationHash(identityHashHex), /^[0-9a-f]{32}$/);
+});
+
+test("deriveNomadNetworkDestinationHash matches the stack's nomadnetwork.node destination hash", async () => {
+  const identity = await Identity.generate();
+  const identityHashHex = toHex(identity.identityHash);
+
+  const dest = await Destination.OUT(
+    NOMADNETWORK_NODE_APP_NAME,
+    DestType.SINGLE,
+    identity,
+    null,
+  );
+
+  assert.equal(
+    deriveNomadNetworkDestinationHash(identityHashHex),
+    toHex(dest.destinationHash),
+  );
+});
+
+test("deriveDestinationHash is a pure function of the identity hash (no public key needed)", async () => {
+  const identity = await Identity.generate();
+  const identityHashHex = toHex(identity.identityHash);
+
+  // Deriving only from the hash matches deriving via the full identity.
+  assert.equal(
+    deriveDestinationHash(identityHashHex, LXMF_DELIVERY_APP_NAME),
+    deriveLxmfDestinationHash(identityHashHex),
+  );
+  // Different app names yield different destination hashes for the same
+  // identity — so the one configured identity reaches every protocol.
+  assert.notEqual(
+    deriveLxmfDestinationHash(identityHashHex),
+    deriveNomadNetworkDestinationHash(identityHashHex),
+  );
+  // Tolerates the same whitespace/dash/case noise normalizeHex handles.
+  assert.equal(
+    deriveLxmfDestinationHash(` ${identityHashHex.toUpperCase()} `),
+    deriveLxmfDestinationHash(identityHashHex),
+  );
+});
+
+test("deriveDestinationHash rejects a malformed identity hash", () => {
+  assert.throws(
+    () => deriveLxmfDestinationHash("abcd"),
+    /Identity hash must be 32 hex characters/,
+  );
+  assert.throws(
+    () => deriveLxmfDestinationHash("zz".repeat(16)),
+    /Identity hash must be 32 hex characters/,
+  );
 });

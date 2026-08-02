@@ -9,6 +9,7 @@ const {
   effectiveCrew,
   sendNotification,
 } = require("../plugin/notifications");
+const { deriveLxmfDestinationHash } = require("../plugin/identity");
 
 const SEND = { messaging: { send_alerts: true } };
 const NO_SEND = { messaging: { send_alerts: false } };
@@ -210,35 +211,61 @@ describe("buildAlertMessage", () => {
 
 describe("effectiveCrew", () => {
   const VALID = "0123456789abcdef0123456789abcdef";
+  // The lxmf.delivery destination hash derived from VALID treated as an
+  // identity hash. effectiveCrew derives this from the `identity` field.
+  const DERIVED = deriveLxmfDestinationHash(VALID);
 
-  it("returns normalised valid entries", () => {
+  it("derives the lxmf.delivery destination hash from an identity hash", () => {
     const crew = effectiveCrew([
-      { name: "Alice", destination: VALID.toUpperCase() },
-      { name: "Bob", destination: `  ${VALID}  ` },
+      { name: "Alice", identity: VALID.toUpperCase() },
+      { name: "Bob", identity: `  ${VALID}  ` },
     ]);
     assert.deepEqual(crew, [
-      { name: "Alice", destinationHash: VALID },
-      { name: "Bob", destinationHash: VALID },
+      { name: "Alice", destinationHash: DERIVED },
+      { name: "Bob", destinationHash: DERIVED },
     ]);
+    // Sanity: the derived hash differs from the raw identity hash, and is
+    // still a 32-char hex value.
+    assert.notEqual(DERIVED, VALID);
+    assert.match(DERIVED, /^[0-9a-f]{32}$/);
   });
 
-  it("skips entries with an invalid destination hash", () => {
+  it("falls back to a legacy lxmf.destination hash used verbatim", () => {
+    const crew = effectiveCrew([{ name: "Carol", destination: VALID }]);
+    assert.deepEqual(crew, [{ name: "Carol", destinationHash: VALID }]);
+  });
+
+  it("prefers identity over a legacy destination when both are present", () => {
+    const crew = effectiveCrew([
+      { name: "Dan", identity: VALID, destination: "f".repeat(32) },
+    ]);
+    assert.deepEqual(crew, [{ name: "Dan", destinationHash: DERIVED }]);
+  });
+
+  it("uses the identity hash as the name fallback for identity entries", () => {
+    const crew = effectiveCrew([{ identity: VALID }]);
+    assert.equal(crew[0].name, VALID);
+    assert.equal(crew[0].destinationHash, DERIVED);
+  });
+
+  it("skips entries with neither a valid identity nor a legacy destination", () => {
     const logged = [];
     const crew = effectiveCrew(
       [
-        { name: "Alice", destination: VALID },
-        { name: "Bad", destination: "nothex" },
-        { name: "Short", destination: "abcd" },
-        { destination: VALID },
+        { name: "Alice", identity: VALID },
+        { name: "Bad", identity: "nothex" },
+        { name: "Short", identity: "abcd" },
+        { name: "Legacy", destination: "nothex" },
+        { identity: VALID },
       ],
       (...args) => logged.push(args.join(" ")),
     );
     assert.equal(crew.length, 2);
     assert.equal(crew[0].name, "Alice");
-    // An unnamed member falls back to its destination hash.
+    // An unnamed member falls back to its identity hash.
     assert.equal(crew[1].name, VALID);
-    assert.equal(logged.length, 2);
-    assert.match(logged[0], /invalid LXMF destination/);
+    assert.equal(logged.length, 3);
+    assert.match(logged[0], /invalid Reticulum identity/);
   });
 
   it("returns [] for non-array input", () => {

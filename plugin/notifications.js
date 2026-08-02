@@ -2,13 +2,18 @@
  * Decides when a Signal K notification should be forwarded to the crew as an
  * LXMF message, and builds the message content.
  *
- * This module is intentionally free of any Reticulum/LXMF coupling: the actual
- * delivery is performed by a caller-supplied `deliver` callback (see
- * {@link sendNotification}), so the notification logic can be unit-tested in
- * isolation.
+ * The notification *decision* logic (debouncing, alert-state gating, message
+ * building) is free of any Reticulum/LXMF coupling and can be unit-tested in
+ * isolation. The actual delivery is performed by a caller-supplied `deliver`
+ * callback (see {@link sendNotification}). The one Reticulum-aware piece is
+ * crew resolution ({@link effectiveCrew}), which derives each member's
+ * `lxmf.delivery` destination hash from their configured Reticulum identity
+ * hash.
  *
  * @file notifications.js
  */
+
+const { deriveLxmfDestinationHash } = require("./identity");
 
 /**
  * Signal K notification states that trigger an LXMF alert to the crew.
@@ -26,6 +31,8 @@ const DEBOUNCE_MS = 5 * 60 * 1000;
 
 /** Matches a canonical 16-byte LXMF destination hash (32 lowercase hex chars). */
 const DESTINATION_HASH_RE = /^[0-9a-f]{32}$/i;
+/** Matches a canonical 16-byte Reticulum identity hash (32 lowercase hex chars). */
+const IDENTITY_HASH_RE = /^[0-9a-f]{32}$/i;
 
 /**
  * @typedef {Object} Episode
@@ -155,8 +162,18 @@ function buildAlertMessage(path, value) {
 }
 
 /**
- * Normalises the configured crew list into `{name, destinationHash}` entries,
- * skipping any entry whose destination hash is not a valid 32-char hex string.
+ * Normalises the configured crew list into `{name, destinationHash}` entries.
+ *
+ * Each crew member is configured by their **Reticulum identity hash** (a
+ * protocol-agnostic 32-char hex value), from which the `lxmf.delivery`
+ * destination hash — the address LXMF messages are delivered to — is derived.
+ * Using the identity hash instead of the raw LXMF destination hash means the
+ * same crew entry can later be reached over other protocols that share the
+ * identity (e.g. identified NomadNet page requests) without reconfiguration.
+ *
+ * For backward compatibility an entry may instead carry a legacy `destination`
+ * field (a raw `lxmf.delivery` destination hash); it is used verbatim. Entries
+ * with neither a valid `identity` nor a valid legacy `destination` are skipped.
  *
  * @param {unknown} crew
  * @param {(...args:any[])=>void} [log] - Called for each skipped entry.
@@ -171,23 +188,36 @@ function effectiveCrew(crew, log) {
     if (!entry || typeof entry !== "object") {
       continue;
     }
-    const destinationHash = normalizeHex(entry.destination);
-    if (!DESTINATION_HASH_RE.test(destinationHash)) {
-      if (log) {
-        log(
-          `Skipping crew member "${entry.name || "?"}" with invalid LXMF ` +
-            `destination: ${entry.destination}`,
-        );
-      }
+    const name =
+      typeof entry.name === "string" && entry.name ? entry.name : null;
+
+    // Preferred: a Reticulum identity hash. Derive the lxmf.delivery
+    // destination hash from it so the entry is protocol-agnostic.
+    const identityHash = normalizeHex(entry.identity);
+    if (IDENTITY_HASH_RE.test(identityHash)) {
+      result.push({
+        name: name || identityHash,
+        destinationHash: deriveLxmfDestinationHash(identityHash),
+      });
       continue;
     }
-    result.push({
-      name:
-        typeof entry.name === "string" && entry.name
-          ? entry.name
-          : destinationHash,
-      destinationHash,
-    });
+
+    // Legacy fallback: a raw lxmf.delivery destination hash, used verbatim.
+    const destinationHash = normalizeHex(entry.destination);
+    if (DESTINATION_HASH_RE.test(destinationHash)) {
+      result.push({ name: name || destinationHash, destinationHash });
+      continue;
+    }
+
+    if (log) {
+      log(
+        `Skipping crew member "${
+          name || "?"
+        }" with invalid Reticulum identity / LXMF destination: ${
+          entry.identity || entry.destination
+        }`,
+      );
+    }
   }
   return result;
 }
@@ -244,6 +274,8 @@ async function sendNotification(path, value, episodes, settings, deliver, app) {
 module.exports = {
   ALERT_STATES,
   DEBOUNCE_MS,
+  DESTINATION_HASH_RE,
+  IDENTITY_HASH_RE,
   normalizeHex,
   wasCleared,
   shouldWeSendNotification,

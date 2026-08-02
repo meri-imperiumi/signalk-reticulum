@@ -36,7 +36,7 @@ Any number of Reticulum interfaces of any available type may be configured. When
 
 ### Crew members
 
-Each crew member is identified by the `lxmf.delivery` destination hash of their Reticulum device (32 hexadecimal characters). Add one entry per crew member under **Crew members**. These are the recipients of alert messages, and can interact with the vessel over LXMF messaging.
+Each crew member is identified by the **Reticulum identity hash** of their device (32 hexadecimal characters) — the same hash NomadNet/Sideband shows for the peer, and the canonical address for any protocol that identifies by Reticulum identity (LXMF, NomadNet page requests). Add one entry per crew member under **Crew members**. These are the recipients of alert messages, and can interact with the vessel over LXMF messaging. The per-protocol destination hash (e.g. `lxmf.delivery`) is derived from the identity automatically, so the same entry can later be reached over other identity-based protocols without reconfiguration.
 
 ### Messaging
 
@@ -69,7 +69,7 @@ The **Connectivity-change trigger paths** list (under **Re-announces**) holds th
 
 ## How alerting works
 
-The plugin subscribes to `notifications.*` on `vessels.self`. When a notification transitions into the `alarm` or `emergency` state, an LXMF message is delivered to each crew member's destination hash.
+The plugin subscribes to `notifications.*` on `vessels.self`. When a notification transitions into the `alarm` or `emergency` state, an LXMF message is delivered to each crew member (addressed to the `lxmf.delivery` destination hash derived from their configured Reticulum identity hash).
 
 A flapping alert (e.g. a bilge sensor switching rapidly on and off) is only forwarded once per active episode. Once the notification clears, it is held for a debounce period before a new occurrence of the same alert will be forwarded again.
 

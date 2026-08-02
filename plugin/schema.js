@@ -272,24 +272,33 @@ function buildPluginSchema(interfaces) {
         type: "array",
         title: "Crew members",
         description:
-          "LXMF destinations to alert. Each entry is a crew member's " +
-          "lxmf.delivery destination hash (32 hexadecimal characters).",
+          "Reticulum identities to alert. Each entry is a crew member's " +
+          "Reticulum identity hash (32 hexadecimal characters) — the same hash " +
+          "shown by NomadNet/Sideband for the peer, and the canonical address " +
+          "for any protocol that identifies by Reticulum identity (LXMF, " +
+          "NomadNet page requests). The per-protocol destination hash (e.g. " +
+          "lxmf.delivery) is derived from it automatically.",
         default: [],
         items: {
           type: "object",
-          required: ["name", "destination"],
+          required: ["name", "identity"],
           properties: {
             name: {
               type: "string",
               title: "Name",
               description: "A label for this crew member (used in logs).",
             },
-            destination: {
+            identity: {
               type: "string",
-              title: "LXMF destination hash",
+              title: "Reticulum identity hash",
               description:
-                "The 32-character hexadecimal lxmf.delivery destination " +
-                "hash of the crew member's device.",
+                "The 32-character hexadecimal Reticulum identity hash of " +
+                "the crew member's device. This is protocol-agnostic: the " +
+                "lxmf.delivery destination hash (used for alerts and " +
+                "telemetry) is derived from it, and the same entry can later " +
+                "be reached over other identity-based protocols without " +
+                "reconfiguration. Find it in NomadNet/Sideband under the " +
+                "peer's details (often labelled 'the hash').",
               pattern: "^[0-9a-fA-F]{32}$",
               minLength: 32,
               maxLength: 32,
