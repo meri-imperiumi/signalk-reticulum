@@ -410,25 +410,27 @@ function buildPluginSchema(interfaces) {
       },
       telemetry: {
         type: "object",
-        title: "Telemetry broadcast",
+        title: "Telemetry",
         description:
-          "Periodically broadcast a Sideband-compatible telemetry snapshot " +
-          "(position, speed and heading, house battery state of charge, plus " +
-          "depth, tide, wind, anchor watch and navigation state as custom " +
-          "sensors) to every configured crew member over LXMF. The snapshot is " +
-          "carried in the LXMF FIELD_TELEMETRY field, so Sideband, NomadNet and " +
-          "MeshChat render it in the peer telemetry view. The same Signal K " +
-          "keys the NomadNet index page serves are used, so both views stay " +
-          "consistent. Off by default.",
+          "Telemetry exchange with the crew. The node can broadcast its own " +
+          "Sideband-compatible snapshot to the crew (outbound) and populate " +
+          "Signal K from telemetry snapshots it receives back from crew " +
+          "members' devices (inbound). The snapshot is carried in the LXMF " +
+          "FIELD_TELEMETRY field, so Sideband, NomadNet and MeshChat render it " +
+          "in the peer telemetry view, and a crew member's position/battery " +
+          "appears in Signal K as a vessel target (on charts, instrument " +
+          "panels) much like an AIS target.",
         properties: {
           enabled: {
             type: "boolean",
-            title: "Broadcast telemetry to the crew",
+            title: "Broadcast own telemetry to the crew",
             description:
-              "When enabled, a telemetry snapshot is sent to each configured " +
-              "crew member shortly after start and then on the interval below. " +
-              "Requires messaging to come up and at least one crew member to be " +
-              "configured.",
+              "When enabled, the node's telemetry snapshot (position, speed " +
+              "and heading, house battery state of charge, plus depth, tide, " +
+              "wind, anchor watch and navigation state as custom sensors) is " +
+              "sent to each configured crew member shortly after start and " +
+              "then on the interval below. Requires messaging to come up and " +
+              "at least one crew member to be configured.",
             default: false,
           },
           interval_seconds: {
@@ -441,6 +443,20 @@ function buildPluginSchema(interfaces) {
               "packet per recipient per interval.",
             default: 300,
             minimum: 30,
+          },
+          populate_crew_telemetry: {
+            type: "boolean",
+            title: "Populate Signal K from crew telemetry",
+            description:
+              "When enabled, a telemetry snapshot received from a configured " +
+              "crew member over LXMF is decoded and written into Signal K " +
+              "under a per-crew vessel context (vessels.urn:reticulum:" +
+              "identity:<hash>), so the crew member shows up as a vessel " +
+              "target — with position, speed/heading, device battery state of " +
+              "charge and any environmental sensors — on charts (Freeboard) " +
+              "and instrument panels. Mirrors how signalk-meshtastic populates " +
+              "Signal K from mesh nodes. Off by default.",
+            default: false,
           },
         },
         additionalProperties: false,

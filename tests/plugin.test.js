@@ -10,6 +10,12 @@ const makePlugin = require("../plugin/index.js");
 const messaging = require("../plugin/messaging");
 const nomadnet = require("../plugin/nomadnet");
 const compression = require("../plugin/compression");
+const {
+  buildTelemetrySensors,
+  packTelemetry,
+  FIELD_TELEMETRY,
+} = require("../plugin/telemetry");
+const { deriveLxmfDestinationHash } = require("../plugin/identity");
 
 // --- Fakes so the plugin can be started without any real network I/O --------
 
@@ -332,6 +338,12 @@ function makeApp() {
           /* best effort */
         }
       }
+    },
+    /** Captures `app.handleMessage(pluginId, delta)` calls so tests can assert
+     * on the deltas the plugin publishes (e.g. inbound crew telemetry). */
+    messages: [],
+    handleMessage(id, delta) {
+      app.messages.push({ id, delta });
     },
   };
   return app;
@@ -1048,6 +1060,131 @@ test("an unmatched LXMF message does not trigger a reply", async () => {
   await new Promise((resolve) => setTimeout(resolve, 10));
 
   assert.equal(router.sent.length, 0);
+});
+
+// --- Inbound crew telemetry -> Signal K -----------------------------------
+
+/** Builds a packed Sideband telemetry snapshot wrapped in an LXMF fields map. */
+function crewTelemetryFields(readings) {
+  const packed = packTelemetry(buildTelemetrySensors(readings), readings.now);
+  return new Map([[FIELD_TELEMETRY, packed]]);
+}
+
+test("an inbound crew telemetry snapshot populates Signal K when enabled", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  const identityHash = "7a3c9f1b2e4d58607a3c9f1b2e4d5860";
+  const lxmfHash = deriveLxmfDestinationHash(identityHash);
+  await plugin.start({
+    messaging: {},
+    telemetry: { populate_crew_telemetry: true },
+    crew: [{ name: "Alice", identity: identityHash }],
+  });
+  const router = plugin.lxmf;
+
+  router.dispatchEvent(
+    new CustomEvent("message", {
+      detail: {
+        message: {
+          sourceHash: Buffer.from(lxmfHash, "hex"),
+          fields: crewTelemetryFields({
+            latitude: 60.1,
+            longitude: 21.1,
+            batteryPercent: 80,
+            now: 1700000000,
+          }),
+        },
+      },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  // Exactly one crew-telemetry delta was published (plus any meta publishes).
+  const crewDeltas = app.messages.filter(
+    (m) =>
+      m.delta.context &&
+      m.delta.context === `vessels.urn:reticulum:identity:${identityHash}`,
+  );
+  assert.equal(crewDeltas.length, 1, "one crew telemetry delta published");
+  const values = crewDeltas[0].delta.updates[0].values;
+  const byPath = Object.fromEntries(
+    values.filter((v) => v.path).map((v) => [v.path, v.value]),
+  );
+  assert.deepEqual(byPath["navigation.position"], {
+    latitude: 60.1,
+    longitude: 21.1,
+  });
+  assert.equal(
+    byPath["electrical.batteries.7a3c9f1b.capacity.stateOfCharge"],
+    0.8,
+  );
+  assert.equal(byPath["communication.reticulum.identityHash"], identityHash);
+
+  await plugin.stop();
+});
+
+test("inbound crew telemetry is dropped when the setting is off", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  const identityHash = "7a3c9f1b2e4d58607a3c9f1b2e4d5860";
+  const lxmfHash = deriveLxmfDestinationHash(identityHash);
+  await plugin.start({
+    messaging: {},
+    telemetry: { populate_crew_telemetry: false },
+    crew: [{ name: "Alice", identity: identityHash }],
+  });
+  const before = app.messages.length;
+  plugin.lxmf.dispatchEvent(
+    new CustomEvent("message", {
+      detail: {
+        message: {
+          sourceHash: Buffer.from(lxmfHash, "hex"),
+          fields: crewTelemetryFields({
+            latitude: 1,
+            longitude: 2,
+            now: 1,
+          }),
+        },
+      },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  // No new crew-telemetry deltas (only the startup meta, if any).
+  assert.equal(app.messages.length, before);
+  await plugin.stop();
+});
+
+test("inbound telemetry from a non-crew sender is dropped", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  await plugin.start({
+    messaging: {},
+    telemetry: { populate_crew_telemetry: true },
+    crew: [{ name: "Alice", identity: "7a3c9f1b2e4d58607a3c9f1b2e4d5860" }],
+  });
+  const before = app.messages.length;
+  plugin.lxmf.dispatchEvent(
+    new CustomEvent("message", {
+      detail: {
+        message: {
+          // A source hash that does NOT match any configured crew member.
+          sourceHash: new Uint8Array(16).fill(4),
+          fields: crewTelemetryFields({ latitude: 1, longitude: 2, now: 1 }),
+        },
+      },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(app.messages.length, before, "no delta for a non-crew sender");
+  await plugin.stop();
+});
+
+test("schema exposes an opt-in populate_crew_telemetry setting", () => {
+  const group = makePlugin(makeApp()).schema().properties.telemetry;
+  assert.equal(group.properties.populate_crew_telemetry.default, false);
+  assert.equal(group.properties.enabled.default, false);
 });
 
 test("stop tears down messaging and the notification subscription", async () => {

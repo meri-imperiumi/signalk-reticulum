@@ -43,6 +43,10 @@ const {
 } = require("./propagation");
 const { effectiveCrew } = require("./notifications");
 const { buildTelemetrySensors, packTelemetry } = require("./telemetry");
+const {
+  handleInboundTelemetry,
+  sendInboundTelemetryMeta,
+} = require("./inbound");
 const commands = require("./commands");
 
 /**
@@ -529,6 +533,15 @@ module.exports = (app) => {
             app.debug(
               `Received LXMF message from ${toHex(message.sourceHash || [])}`,
             );
+            // Populate Signal K from any telemetry snapshot a crew member's
+            // device sent us (position, battery, environment). Runs before
+            // the command handler; telemetry messages carry no command text,
+            // so the two never conflict.
+            try {
+              handleInboundTelemetry(message, config, app);
+            } catch (e) {
+              app.debug(`Inbound telemetry error: ${e.message}`);
+            }
             try {
               await commands.handleMessage(
                 message,
@@ -620,6 +633,11 @@ module.exports = (app) => {
         } catch (e) {
           app.debug(`Messaging setup error: ${e.message}`);
         }
+
+        // Publish units/labels for the paths inbound crew telemetry writes
+        // to, so instruments render them correctly. Idempotent and safe to
+        // call even when messaging did not come up.
+        sendInboundTelemetryMeta(app);
 
         // --- LXMF store-and-forward (propagation-node client) --------------
         // The node acts as a *client* of an external LXMF propagation node:

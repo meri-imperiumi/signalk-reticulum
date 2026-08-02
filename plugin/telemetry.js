@@ -446,6 +446,14 @@ function buildTelemetrySensors(readings = {}) {
 }
 
 /**
+ * LXMF `FIELD_TELEMETRY` field id (§5.9.1). A single telemetry snapshot is
+ * carried in an LXMF message's `fields` map under this integer key. Defined
+ * locally (rather than imported from `@reticulum/core`) to keep this module
+ * self-contained — the value is fixed by the LXMF spec.
+ */
+const FIELD_TELEMETRY = 0x02;
+
+/**
  * Rounds to one decimal place (used for human-readable telemetry strings).
  *
  * @param {number} n
@@ -455,8 +463,226 @@ function round1(n) {
   return Math.round(n * 10) / 10;
 }
 
+// ---------------------------------------------------------------------------
+// Inbound: Sideband telemetry *unpackers*
+// ---------------------------------------------------------------------------
+//
+// The packers above build the Sideband `Telemeter.packed()` wire values from
+// normalised readings. These unpackers are their exact inverses, turning a
+// decoded sensor value back into the same normalised readings so inbound crew
+// telemetry can be converted into Signal K updates. Every unpacker tolerates a
+// missing/malformed value by returning `null`, so a partially-populated or
+// forward-compatible snapshot degrades gracefully instead of throwing.
+
+/**
+ * Reads a 4-byte big-endian signed integer out of a `bin` sensor element.
+ *
+ * @param {Uint8Array} bin
+ * @returns {number}
+ */
+function readI32(bin) {
+  return new DataView(bin.buffer, bin.byteOffset, bin.byteLength).getInt32(
+    0,
+    false,
+  );
+}
+
+/**
+ * Reads a 4-byte big-endian unsigned integer out of a `bin` sensor element.
+ *
+ * @param {Uint8Array} bin
+ * @returns {number}
+ */
+function readU32(bin) {
+  return new DataView(bin.buffer, bin.byteOffset, bin.byteLength).getUint32(
+    0,
+    false,
+  );
+}
+
+/**
+ * Reads a 2-byte big-endian unsigned integer out of a `bin` sensor element.
+ *
+ * @param {Uint8Array} bin
+ * @returns {number}
+ */
+function readU16(bin) {
+  return new DataView(bin.buffer, bin.byteOffset, bin.byteLength).getUint16(
+    0,
+    false,
+  );
+}
+
+/**
+ * Unpacks a Sideband `location` sensor wire value back into decimal-degree /
+ * human-unit readings — the inverse of {@link packLocation}. Returns `null`
+ * unless the array carries at least the six fixed-point integers.
+ *
+ * @param {Array|null|undefined} packed
+ * @returns {{latitude:number, longitude:number, altitudeM:number, speedKmh:number, bearingDeg:number, accuracyM:number, lastUpdate:number|undefined}|null}
+ */
+function unpackLocation(packed) {
+  if (!Array.isArray(packed) || packed.length < 6) {
+    return null;
+  }
+  return {
+    latitude: readI32(packed[0]) / 1e6,
+    longitude: readI32(packed[1]) / 1e6,
+    altitudeM: readI32(packed[2]) / 1e2,
+    speedKmh: readU32(packed[3]) / 1e2,
+    bearingDeg: readI32(packed[4]) / 1e2,
+    accuracyM: readU16(packed[5]) / 1e2,
+    lastUpdate: packed.length > 6 ? packed[6] : undefined,
+  };
+}
+
+/**
+ * Unpacks a Sideband `battery` sensor wire value
+ * `[charge_percent, charging, temperature]` back into a reading — the inverse
+ * of {@link packBattery}. Returns `null` for a missing/empty array.
+ *
+ * @param {Array|null|undefined} packed
+ * @returns {{chargePercent:number, charging:boolean, temperature:number|null}|null}
+ */
+function unpackBattery(packed) {
+  if (!Array.isArray(packed) || packed.length === 0) {
+    return null;
+  }
+  return {
+    chargePercent: packed[0],
+    charging: packed[1] === true,
+    temperature: packed.length > 2 ? packed[2] : null,
+  };
+}
+
+/**
+ * Unpacks a Sideband `custom` sensor wire value
+ * `[[label, [value, icon]], ...]` back into entries — the inverse of
+ * {@link packCustom}. Malformed entries are dropped.
+ *
+ * @param {Array|null|undefined} packed
+ * @returns {Array<{label:string|null, value:*, icon:*}>}
+ */
+function unpackCustom(packed) {
+  if (!Array.isArray(packed)) {
+    return [];
+  }
+  const result = [];
+  for (const entry of packed) {
+    if (!Array.isArray(entry) || entry.length < 2) {
+      continue;
+    }
+    const pair = entry[1];
+    if (!Array.isArray(pair)) {
+      continue;
+    }
+    result.push({
+      label: typeof entry[0] === "string" ? entry[0] : null,
+      value: pair[0],
+      icon: pair.length > 1 ? pair[1] : null,
+    });
+  }
+  return result;
+}
+
+/**
+ * Pulls the raw packed-telemetry bytes out of an LXMF message's `fields`, or
+ * `null` when the message carries no telemetry snapshot.
+ *
+ * A deserialized LXMF message's `fields` is a plain object whose keys are the
+ * stringified field ids (MessagePack integer keys come back as `"2"`); a
+ * locally-constructed message may instead use a `Map` with integer keys. Both
+ * shapes are handled, and a `null`/empty value is treated as absent.
+ *
+ * @param {Map<number, *>|Record<string, *>|null|undefined} fields
+ * @returns {Uint8Array|null}
+ */
+function extractTelemetryField(fields) {
+  if (!fields) {
+    return null;
+  }
+  if (fields instanceof Map) {
+    return fields.has(FIELD_TELEMETRY) ? fields.get(FIELD_TELEMETRY) : null;
+  }
+  const value = fields[FIELD_TELEMETRY];
+  return value != null ? value : null;
+}
+
+/**
+ * Decodes a packed Sideband telemetry snapshot into a normalised readings
+ * object keyed by human-readable sensor name — the inbound counterpart of
+ * {@link buildTelemetrySensors}.
+ *
+ * Only the sensors relevant to populating Signal K from a crew member's device
+ * are decoded (location, battery, temperature, pressure, humidity, time, plus
+ * the freeform `custom`/`information` blobs passed through verbatim). Unknown
+ * SIDs are ignored, so a newer client sending extra sensors is harmless.
+ * Returns `null` for empty/absent input.
+ *
+ * @param {Uint8Array|null|undefined} packedTelemetry
+ * @returns {{latitude?:number, longitude?:number, altitudeM?:number, speedKmh?:number, bearingDeg?:number, accuracyM?:number, lastUpdate?:number, battery?:{chargePercent:number, charging:boolean, temperature:number|null}, temperatureC?:number, pressureMbar?:number, humidityPercent?:number, information?:string, custom?:Array<{label:string|null, value:*, icon:*}>, time?:number}|null}
+ */
+function decodeTelemetrySnapshot(packedTelemetry) {
+  if (!packedTelemetry) {
+    return null;
+  }
+  const sensors = MsgPack.decode(packedTelemetry);
+  const get = (sid) => sensors[String(sid)];
+  /** @type {object} */
+  const readings = {};
+
+  const location = get(SID.LOCATION);
+  if (location) {
+    const loc = unpackLocation(location);
+    if (loc) {
+      Object.assign(readings, loc);
+    }
+  }
+
+  const battery = get(SID.BATTERY);
+  if (battery) {
+    const bat = unpackBattery(battery);
+    if (bat) {
+      readings.battery = bat;
+    }
+  }
+
+  const temperature = get(SID.TEMPERATURE);
+  if (typeof temperature === "number") {
+    readings.temperatureC = temperature;
+  }
+
+  const pressure = get(SID.PRESSURE);
+  if (typeof pressure === "number") {
+    readings.pressureMbar = pressure;
+  }
+
+  const humidity = get(SID.HUMIDITY);
+  if (typeof humidity === "number") {
+    readings.humidityPercent = humidity;
+  }
+
+  const information = get(SID.INFORMATION);
+  if (typeof information === "string") {
+    readings.information = information;
+  }
+
+  const custom = get(SID.CUSTOM);
+  if (Array.isArray(custom)) {
+    readings.custom = unpackCustom(custom);
+  }
+
+  const time = get(SID.TIME);
+  if (typeof time === "number") {
+    readings.time = time;
+  }
+
+  return readings;
+}
+
 module.exports = {
   SID,
+  FIELD_TELEMETRY,
   packLocation,
   packBattery,
   packCustom,
@@ -468,4 +694,10 @@ module.exports = {
   packTelemetry,
   makeTelemetryFields,
   buildTelemetrySensors,
+  // Inbound (Sideband → readings)
+  unpackLocation,
+  unpackBattery,
+  unpackCustom,
+  extractTelemetryField,
+  decodeTelemetrySnapshot,
 };

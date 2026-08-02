@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const { MsgPack } = require("@reticulum/core");
 const {
   SID,
+  FIELD_TELEMETRY,
   packLocation,
   packBattery,
   packCustom,
@@ -15,6 +16,11 @@ const {
   packTelemetry,
   makeTelemetryFields,
   buildTelemetrySensors,
+  unpackLocation,
+  unpackBattery,
+  unpackCustom,
+  extractTelemetryField,
+  decodeTelemetrySnapshot,
 } = require("../plugin/telemetry");
 
 /** Reads a 4-byte big-endian signed int out of a bin element. */
@@ -251,4 +257,167 @@ test("a full snapshot round-trips through Sideband-style decoding", () => {
   assert.equal(readI32(loc[1]), Math.round(151.2073 * 1e6));
   assert.deepEqual(decoded[SID.BATTERY], [92.1, false, null]);
   assert.ok(Array.isArray(decoded[SID.CUSTOM]));
+});
+
+// ---------------------------------------------------------------------------
+// Inbound: unpackers (Sideband wire values → readings)
+// ---------------------------------------------------------------------------
+
+test("unpackLocation is the inverse of packLocation", () => {
+  const packed = packLocation({
+    latitude: 60.175987,
+    longitude: -21.094551,
+    altitude: 12.5,
+    speedKmh: 18.4,
+    bearingDeg: 214.3,
+    accuracyM: 4.2,
+    lastUpdate: 1700000000,
+  });
+  const loc = unpackLocation(packed);
+  assert.deepEqual(loc, {
+    latitude: 60.175987,
+    longitude: -21.094551,
+    altitudeM: 12.5,
+    speedKmh: 18.4,
+    bearingDeg: 214.3,
+    accuracyM: 4.2,
+    lastUpdate: 1700000000,
+  });
+});
+
+test("unpackLocation returns null for missing or malformed input", () => {
+  assert.equal(unpackLocation(null), null);
+  assert.equal(unpackLocation(undefined), null);
+  assert.equal(unpackLocation([]), null);
+  assert.equal(unpackLocation([1, 2, 3]), null); // too few elements
+});
+
+test("unpackLocation tolerates a missing trailing timestamp", () => {
+  const full = packLocation({ latitude: 1, longitude: 2, lastUpdate: 9 });
+  // strip the trailing lastUpdate integer, leaving the six fixed-point ints
+  const truncated = full.slice(0, 6);
+  const loc = unpackLocation(truncated);
+  assert.equal(loc.lastUpdate, undefined);
+  assert.equal(loc.latitude, 1);
+});
+
+test("unpackBattery is the inverse of packBattery", () => {
+  assert.deepEqual(
+    unpackBattery(packBattery({ chargePercent: 87.3, charging: true })),
+    {
+      chargePercent: 87.3,
+      charging: true,
+      temperature: null,
+    },
+  );
+  assert.deepEqual(
+    unpackBattery(
+      packBattery({ chargePercent: 50, charging: false, temperature: 24.5 }),
+    ),
+    { chargePercent: 50, charging: false, temperature: 24.5 },
+  );
+  assert.equal(unpackBattery(null), null);
+  assert.equal(unpackBattery([]), null);
+});
+
+test("unpackCustom is the inverse of packCustom and drops malformed entries", () => {
+  assert.deepEqual(
+    unpackCustom(
+      packCustom([
+        { label: "Depth", value: "5.2 m", icon: "waves" },
+        { label: "State", value: "anchored" },
+      ]),
+    ),
+    [
+      { label: "Depth", value: "5.2 m", icon: "waves" },
+      { label: "State", value: "anchored", icon: null },
+    ],
+  );
+  assert.deepEqual(unpackCustom(null), []);
+  assert.deepEqual(unpackCustom([1, 2, ["x"]]), []);
+});
+
+test("extractTelemetryField pulls the snapshot from a deserialized fields object", () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  // A deserialized LXMF message's fields is a plain object with string keys.
+  const fields = { [FIELD_TELEMETRY]: bytes };
+  assert.equal(extractTelemetryField(fields), bytes);
+});
+
+test("extractTelemetryField pulls the snapshot from a locally-built Map", () => {
+  const bytes = new Uint8Array([9, 8]);
+  const fields = makeTelemetryFields(bytes);
+  assert.ok(fields instanceof Map);
+  assert.equal(extractTelemetryField(fields), bytes);
+});
+
+test("extractTelemetryField returns null when there is no telemetry field", () => {
+  assert.equal(extractTelemetryField(null), null);
+  assert.equal(extractTelemetryField(undefined), null);
+  assert.equal(extractTelemetryField({}), null);
+  assert.equal(extractTelemetryField(new Map()), null);
+  assert.equal(extractTelemetryField({ 3: new Uint8Array([1]) }), null);
+});
+
+test("decodeTelemetrySnapshot decodes a packed snapshot back into readings", () => {
+  const sensors = buildTelemetrySensors({
+    latitude: 60.1,
+    longitude: 21.1,
+    altitudeM: 5,
+    speedMs: 5, // -> 18 km/h
+    bearingRad: Math.PI, // -> 180 deg
+    batteryPercent: 80,
+    vesselState: "anchored",
+    now: 1700000000,
+  });
+  const packed = packTelemetry(sensors, 1700000000);
+  const readings = decodeTelemetrySnapshot(packed);
+
+  assert.equal(readings.latitude, 60.1);
+  assert.equal(readings.longitude, 21.1);
+  assert.equal(readings.altitudeM, 5);
+  assert.equal(readings.speedKmh, 18);
+  assert.equal(readings.bearingDeg, 180);
+  assert.equal(readings.lastUpdate, 1700000000);
+  assert.deepEqual(readings.battery, {
+    chargePercent: 80,
+    charging: false,
+    temperature: null,
+  });
+  assert.equal(readings.time, 1700000000);
+  assert.ok(Array.isArray(readings.custom));
+});
+
+test("decodeTelemetrySnapshot decodes scalar environment sensors", () => {
+  const packed = packTelemetry(
+    {
+      temperature: packTemperature(22.5),
+      pressure: packPressure(1013.25),
+      humidity: packHumidity(55.5),
+      information: packInformation("Hello"),
+    },
+    1700000010,
+  );
+  const readings = decodeTelemetrySnapshot(packed);
+  assert.equal(readings.temperatureC, 22.5);
+  assert.equal(readings.pressureMbar, 1013.25);
+  assert.equal(readings.humidityPercent, 55.5);
+  assert.equal(readings.information, "Hello");
+  assert.equal(readings.time, 1700000010);
+});
+
+test("decodeTelemetrySnapshot returns null for empty input", () => {
+  assert.equal(decodeTelemetrySnapshot(null), null);
+  assert.equal(decodeTelemetrySnapshot(undefined), null);
+});
+
+test("decodeTelemetrySnapshot ignores unknown sensor ids (forward compatible)", () => {
+  // A snapshot carrying only an unknown SID still decodes (to a bare time +
+  // the unknown sensor) without throwing.
+  const map = new Map([
+    [SID.TIME, 123],
+    [0x99, "future sensor"],
+  ]);
+  const readings = decodeTelemetrySnapshot(MsgPack.encode(map));
+  assert.equal(readings.time, 123);
 });
