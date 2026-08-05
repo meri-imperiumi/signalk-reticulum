@@ -25,10 +25,11 @@
  * @file appearance.js
  */
 
-const RNS = require("@reticulum/core");
+// LXMF moved out of the package root in @reticulum/core 0.6 — deep-import it.
+const { LXMFConstants } = require("@reticulum/core/src/lxmf/index.js");
 
 /** Spec field id for the sender icon/colors (LXMF/LXMF.py:11). */
-const FIELD_ICON_APPEARANCE = RNS.LXMFConstants.FIELD_ICON_APPEARANCE;
+const FIELD_ICON_APPEARANCE = LXMFConstants.FIELD_ICON_APPEARANCE;
 
 /** Material Design Icon name for sailing vessels (AIS ship type 36). */
 const SAIL_ICON = "sail-boat";

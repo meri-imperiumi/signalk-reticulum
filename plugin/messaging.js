@@ -16,16 +16,22 @@
  */
 
 const RNS = require("@reticulum/core");
+// LXMF moved out of the package root in @reticulum/core 0.6 — deep-import it.
+const {
+  LXMRouter,
+  LXMessage,
+  LXMFConstants,
+} = require("@reticulum/core/src/lxmf/index.js");
 
 const { withAppearance } = require("./appearance");
 
 /** Injected transport classes; tests swap these for fakes. */
 const deps = {
-  LXMRouter: RNS.LXMRouter,
-  LXMessage: RNS.LXMessage,
+  LXMRouter,
+  LXMessage,
   Destination: RNS.Destination,
-  FIELD_TELEMETRY: RNS.LXMFConstants.FIELD_TELEMETRY,
-  FIELD_ICON_APPEARANCE: RNS.LXMFConstants.FIELD_ICON_APPEARANCE,
+  FIELD_TELEMETRY: LXMFConstants.FIELD_TELEMETRY,
+  FIELD_ICON_APPEARANCE: LXMFConstants.FIELD_ICON_APPEARANCE,
   fromHex: RNS.fromHex,
   toHex: RNS.toHex,
 };

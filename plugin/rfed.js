@@ -31,13 +31,17 @@
  */
 
 const RNS = require("@reticulum/core");
+// LXMF and RFed moved out of the package root in @reticulum/core 0.6 —
+// deep-import them by subpath.
+const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
+const { RFedClient } = require("@reticulum/core/src/rfed/index.js");
 const { FIELD_TELEMETRY } = require("./telemetry");
 const { extractTelemetryField } = require("./telemetry");
 
 /** Injected transport classes; tests swap these for fakes. */
 const deps = {
-  RFedClient: RNS.RFedClient,
-  LXMessage: RNS.LXMessage,
+  RFedClient,
+  LXMessage,
   MsgPack: RNS.MsgPack,
   fromHex: RNS.fromHex,
   toHex: RNS.toHex,
