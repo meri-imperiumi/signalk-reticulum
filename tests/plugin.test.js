@@ -6,6 +6,11 @@ const os = require("node:os");
 const { Identity, toHex } = require("@reticulum/core");
 const { listInterfaces, FileStorageAdapter } = require("@reticulum/node");
 const { configKeyFor, EXCLUDED_INTERFACE_IDS } = require("../plugin/schema");
+const {
+  PROPAGATION_ASPECT,
+  RFED_NODE_ASPECTS,
+  aspectNameHashesHex,
+} = require("../plugin/discovery");
 const makePlugin = require("../plugin/index.js");
 const messaging = require("../plugin/messaging");
 const nomadnet = require("../plugin/nomadnet");
@@ -1209,7 +1214,13 @@ test("schema exposes an opt-in propagation configuration group", () => {
   const group = makePlugin(makeApp()).schema().properties.propagation;
   assert.equal(group.properties.enabled.default, false);
   assert.equal(group.properties.node.default, "");
-  assert.equal(group.properties.node.pattern, "^[0-9a-fA-F]{32}$");
+  // The node hash is optional: empty (the default) auto-discovers the
+  // closest propagation node, and a non-empty value must be a full hash.
+  assert.equal(group.properties.node.pattern, "^([0-9a-fA-F]{32})?$");
+  assert.ok(
+    /auto-discover/.test(group.properties.node.description),
+    "node description mentions auto-discovery",
+  );
   assert.equal(group.properties.sync_interval_minutes.default, 5);
   assert.equal(group.properties.sync_interval_minutes.minimum, 1);
 });
@@ -1232,7 +1243,7 @@ test("start does not configure a propagation node when disabled", async () => {
   await plugin.stop();
 });
 
-test("start ignores propagation when enabled but no valid node is configured", async () => {
+test("start falls back to propagation auto-discovery when the configured node hash is invalid", async () => {
   const app = makeApp();
   const plugin = makePlugin(app);
   FakeLxmRouter.instances.length = 0;
@@ -1242,10 +1253,21 @@ test("start ignores propagation when enabled but no valid node is configured", a
     propagation: { enabled: true, node: "not-a-hash" },
   });
 
+  // An invalid hash is treated like an empty one: nothing is configured yet,
+  // and the closest propagation node is auto-discovered instead.
   assert.deepEqual(plugin.lxmf.propagationNodeCalls, []);
   assert.ok(
     app.debugCalls.some((args) =>
-      /no valid node destination hash/.test(args.join(" ")),
+      /not a valid destination hash; falling back to auto-discovery/.test(
+        args.join(" "),
+      ),
+    ),
+  );
+  assert.ok(
+    app.debugCalls.some((args) =>
+      /auto-discovering the closest lxmf\.propagation node/.test(
+        args.join(" "),
+      ),
     ),
   );
   await plugin.stop();
@@ -1482,6 +1504,92 @@ test("an announce from the configured propagation node is persisted", async () =
   );
 
   await plugin.stop();
+});
+
+test("propagation auto-discovers the closest node when none is configured", async () => {
+  const realDiscover = makePlugin.deps.discoverClosestNode;
+  let captured;
+  makePlugin.deps.discoverClosestNode = (opts) => {
+    captured = opts;
+    return () => {};
+  };
+  try {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    FakeLxmRouter.instances.length = 0;
+
+    await plugin.start({
+      messaging: { display_name: "Boat" },
+      // Empty node -> auto-discovery path.
+      propagation: { enabled: true, node: "" },
+    });
+
+    // Discovery is wired against the lxmf.propagation aspect name_hash.
+    assert.ok(captured, "discoverClosestNode was called");
+    assert.deepEqual(
+      captured.nameHashesHex,
+      aspectNameHashesHex([PROPAGATION_ASPECT]),
+    );
+    assert.equal(plugin.lxmf.propagationNodeCalls.length, 0);
+
+    // A discovered propagation node is configured exactly like an explicit one.
+    captured.onSelect(PROP_NODE, 1);
+    assert.deepEqual(plugin.lxmf.propagationNodeCalls, [
+      Buffer.from(PROP_NODE, "hex"),
+    ]);
+    assert.ok(
+      app.debugCalls.some((args) =>
+        /Auto-discovered LXMF propagation node/.test(args.join(" ")),
+      ),
+    );
+    assert.ok(
+      app.debugCalls.some((args) =>
+        /Configured LXMF propagation node/.test(args.join(" ")),
+      ),
+    );
+
+    await plugin.stop();
+  } finally {
+    makePlugin.deps.discoverClosestNode = realDiscover;
+  }
+});
+
+test("propagation auto-discovery wires persistence for the discovered node", async () => {
+  const realDiscover = makePlugin.deps.discoverClosestNode;
+  let onSelect;
+  makePlugin.deps.discoverClosestNode = (opts) => {
+    onSelect = opts.onSelect;
+    return () => {};
+  };
+  try {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    await plugin.start({
+      messaging: { display_name: "Boat" },
+      propagation: { enabled: true, node: "" },
+    });
+    const rns = plugin.rns;
+
+    // The discovered node's announce is persisted, same as an explicit node.
+    onSelect(PROP_NODE, 2);
+    rns.transport.dispatchEvent(
+      new CustomEvent("announce", {
+        detail: {
+          destinationHash: Buffer.from(PROP_NODE, "hex"),
+          identity: { publicKey: new Uint8Array() },
+        },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(
+      app.debugCalls.some((args) =>
+        /Persisted propagation node/.test(args.join(" ")),
+      ),
+    );
+    await plugin.stop();
+  } finally {
+    makePlugin.deps.discoverClosestNode = realDiscover;
+  }
 });
 
 // --- Telemetry broadcast (opt-in) ----------------------------------------
@@ -2076,7 +2184,13 @@ test("schema exposes an opt-in rfed configuration group", () => {
   assert.equal(group.properties.receive_telemetry.default, false);
   assert.equal(group.properties.channel.default, "public.signalk.vessels");
   assert.equal(group.properties.interval_seconds.default, 300);
-  assert.equal(group.properties.node.pattern, "^[0-9a-fA-F]{32}$");
+  // The node hash is optional: empty (the default) auto-discovers the
+  // closest rfed federation node, and a non-empty value must be a full hash.
+  assert.equal(group.properties.node.pattern, "^([0-9a-fA-F]{32})?$");
+  assert.ok(
+    /auto-discover/.test(group.properties.node.description),
+    "node description mentions auto-discovery",
+  );
   assert.equal(group.additionalProperties, false);
 });
 
@@ -2110,17 +2224,28 @@ test(
 );
 
 test(
-  "start ignores RFed when enabled but no valid node hash is configured",
+  "start falls back to RFed auto-discovery when the configured node hash is invalid",
   withFakeRFedClient(async () => {
     const app = makeApp();
     const plugin = makePlugin(app);
     await plugin.start({
       rfed: { enabled: true, node: "not-a-hash" },
     });
+    // An invalid hash is treated like an empty one: nothing is brought up
+    // yet, and the closest federation node is auto-discovered instead.
     assert.equal(FakeRFedClient.instances.length, 0);
     assert.ok(
       app.debugCalls.some((args) =>
-        /no valid node destination hash/.test(args.join(" ")),
+        /not a valid destination hash; falling back to auto-discovery/.test(
+          args.join(" "),
+        ),
+      ),
+    );
+    assert.ok(
+      app.debugCalls.some((args) =>
+        /auto-discovering the closest rfed federation node/.test(
+          args.join(" "),
+        ),
       ),
     );
     await plugin.stop();
@@ -2246,5 +2371,50 @@ test(
     await plugin.start({ rfed: { enabled: false, node: RFED_NODE } });
     assert.equal(FakeRFedClient.instances.length, 0);
     await plugin.stop();
+  }),
+);
+
+test(
+  "RFed auto-discovers the closest federation node when none is configured",
+  withFakeRFedClient(async () => {
+    const realDiscover = makePlugin.deps.discoverClosestNode;
+    let captured;
+    makePlugin.deps.discoverClosestNode = (opts) => {
+      captured = opts;
+      return () => {};
+    };
+    try {
+      const app = makeApp();
+      const plugin = makePlugin(app);
+      await plugin.start({
+        messaging: { display_name: "Boat" },
+        // Empty node -> auto-discovery path.
+        rfed: { enabled: true, node: "", receive_telemetry: true },
+      });
+
+      // Discovery matches the rfed federation-node server aspects and excludes
+      // the client-only rfed.delivery.
+      assert.ok(captured, "discoverClosestNode was called");
+      assert.deepEqual(
+        captured.nameHashesHex.slice().sort(),
+        aspectNameHashesHex(RFED_NODE_ASPECTS).slice().sort(),
+      );
+      assert.equal(FakeRFedClient.instances.length, 0);
+
+      // A discovered node brings up the client exactly like an explicit one.
+      await captured.onSelect(RFED_NODE, 1);
+      assert.equal(FakeRFedClient.instances.length, 1);
+      const client = FakeRFedClient.instances[0];
+      assert.equal(client.listenCalls, 1);
+      assert.ok(client.subscribeCalls.length >= 1);
+      assert.ok(
+        app.debugCalls.some((args) =>
+          /Auto-discovered RFed federation node/.test(args.join(" ")),
+        ),
+      );
+      await plugin.stop();
+    } finally {
+      makePlugin.deps.discoverClosestNode = realDiscover;
+    }
   }),
 );

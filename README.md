@@ -47,7 +47,7 @@ Each crew member is identified by the **Reticulum identity hash** of their devic
 
 ### Store-and-forward
 
-LXMF messages can be delivered store-and-forward through an LXMF propagation node. The node acts as a **client** of a propagation node — it never runs the propagation role itself. Run a dedicated propagation node on the boat (NomadNet, Sideband, or `rnsd`) and enter its `lxmf.propagation` destination hash (32 hexadecimal characters) under **LXMF store-and-forward (propagation node)**.
+LXMF messages can be delivered store-and-forward through an LXMF propagation node. The node acts as a **client** of a propagation node — it never runs the propagation role itself. Run a dedicated propagation node on the boat (NomadNet, Sideband, or `rnsd`) and enter its `lxmf.propagation` destination hash (32 hexadecimal characters) under **LXMF store-and-forward (propagation node)**, or leave it empty to **auto-discover** the closest propagation node on the mesh from its announce.
 
 When enabled, two things happen:
 
@@ -77,7 +77,7 @@ Under **Telemetry** the node can exchange telemetry with the crew's handheld dev
 
 ### RFed ship-to-ship telemetry
 
-Under **RFed ship-to-ship telemetry** the node can exchange vessel telemetry *with other boats* over an RFed (Reticulum Federation) channel — many-to-many messaging relayed by a federation node. This is distinct from the one-to-one crew messaging above: every publishing boat on the channel hears every other. Run an rfed federation node (e.g. the Rust `rfed` reference) and enter any of its `rfed.*` destination hashes, then pick a channel (the default `public.signalk.vessels` lets boats discover each other out of the box; the RFed spec recommends public channels be `public.`-prefixed). Transmit and receive are independent opt-ins.
+Under **RFed ship-to-ship telemetry** the node can exchange vessel telemetry *with other boats* over an RFed (Reticulum Federation) channel — many-to-many messaging relayed by a federation node. This is distinct from the one-to-one crew messaging above: every publishing boat on the channel hears every other. Run an rfed federation node (e.g. the Rust `rfed` reference) and enter any of its `rfed.*` destination hashes, or leave it empty to **auto-discover** the closest federation node from its announce (other boats' `rfed.delivery` announces are ignored). Then pick a channel (the default `public.signalk.vessels` lets boats discover each other out of the box; the RFed spec recommends public channels be `public.`-prefixed). Transmit and receive are independent opt-ins.
 
 The snapshot carries roughly what AIS broadcasts plus basic weather — static vessel info (name, MMSI, callsign, AIS ship type, draft, length, beam, destination), dynamic navigation (position, SOG, COG, true heading, navigation state) and weather (true wind, barometric pressure, outside temperature, humidity) — in Signal K canonical units. Received boats are populated as vessel targets under `vessels.urn:mrn:imo:mmsi:<MMSI>` (Signal K's standard AIS vessel URN, so a boat heard over the mesh merges with its real AIS target), falling back to `vessels.urn:reticulum:identity:<hash>` when a publisher has no MMSI.
 

@@ -54,6 +54,12 @@ const {
   setupRFed,
   handleInboundShipTelemetry,
 } = require("./rfed");
+const {
+  RFED_NODE_ASPECTS,
+  PROPAGATION_ASPECT,
+  aspectNameHashesHex,
+  discoverClosestNode,
+} = require("./discovery");
 const commands = require("./commands");
 
 /**
@@ -69,6 +75,7 @@ const deps = {
   createStorageAdapter,
   setupCrewPersistence,
   setupPropagationNodePersistence,
+  discoverClosestNode,
 };
 
 /**
@@ -756,35 +763,78 @@ module.exports = (app) => {
         // outbound messages to the node when a recipient can't be reached
         // directly (sending). The node never runs the propagation role itself.
         // Alerts default to the direct deliverer above; when a propagation
-        // node is configured the direct deliverer is wrapped so a recipient
-        // with no known path is reached via store-and-forward instead.
+        // node is configured (or auto-discovered) the direct deliverer is
+        // wrapped so a recipient with no known path is reached via
+        // store-and-forward instead.
+        //
+        // The node hash may be configured explicitly, or — when left empty —
+        // auto-discovered as the closest lxmf.propagation announce heard on
+        // the mesh shortly after start. Either way the same `bringUp`
+        // closure wires up persistence, the periodic sync, and the
+        // direct-first / propagation-fallback deliverer.
         alertDeliver = deliver;
-        let propagationNodeHex = "";
         if (config && config.propagation && config.propagation.enabled) {
-          propagationNodeHex = normalizeNodeHash(config.propagation.node);
-          if (!propagationNodeHex) {
+          const rawPropagationNode = config.propagation.node;
+          const configuredPropagationHex =
+            normalizeNodeHash(rawPropagationNode);
+          if (rawPropagationNode && !configuredPropagationHex) {
             app.debug(
-              "Propagation enabled but no valid node destination hash configured",
+              `Configured LXMF propagation node "${rawPropagationNode}" is not a valid destination hash; falling back to auto-discovery`,
             );
           }
-        }
-        if (propagationNodeHex && plugin.lxmf) {
-          // Persist the propagation node's identity the moment it announces,
-          // so a restart can sync from it immediately instead of waiting to
-          // hear it again.
-          unsubscribes.push(
-            deps.setupPropagationNodePersistence(
+          // The pre-emptive persistence watch is refreshed to whichever node
+          // is in use, so a restart can sync from it immediately. The wrapper
+          // reads the latest unsubscribe at teardown time.
+          let propagationPersistenceUnsub = () => {};
+          unsubscribes.push(() => {
+            try {
+              propagationPersistenceUnsub();
+            } catch {
+              /* best effort */
+            }
+          });
+          let propagationWired = false;
+          /**
+           * Configures `nodeHex` as the outbound propagation node: refreshes
+           * the persistence watch and (the first time only) wires up the
+           * periodic sync and the direct-first / propagation-fallback
+           * deliverer. Idempotent beyond the first call so a later
+           * auto-discovery of the same role can re-point the node without
+           * double-registering timers.
+           */
+          const bringUpPropagation = (nodeHex) => {
+            if (!plugin.lxmf) {
+              app.debug(
+                "Propagation node configured/discovered but LXMF messaging is not up; skipping",
+              );
+              return;
+            }
+            try {
+              propagationPersistenceUnsub();
+            } catch {
+              /* best effort */
+            }
+            // Persist the propagation node's identity the moment it announces,
+            // so a restart can sync from it immediately instead of waiting to
+            // hear it again.
+            propagationPersistenceUnsub = deps.setupPropagationNodePersistence(
               rns,
-              propagationNodeHex,
+              nodeHex,
               app.debug,
-            ),
-          );
-          const configured = configurePropagationNode(
-            plugin.lxmf,
-            propagationNodeHex,
-            app.debug,
-          );
-          if (configured) {
+            );
+            const configured = configurePropagationNode(
+              plugin.lxmf,
+              nodeHex,
+              app.debug,
+            );
+            if (!configured) {
+              return;
+            }
+            if (propagationWired) {
+              app.debug(`Switched LXMF propagation node to ${nodeHex}`);
+              return;
+            }
+            propagationWired = true;
             // Receiving: periodically pull messages the propagation node is
             // holding for this node. Synced messages dispatch through the
             // same `message` event as direct ones, so they reach the command
@@ -829,6 +879,30 @@ module.exports = (app) => {
               fromHex,
               debug: app.debug,
             });
+          };
+          if (configuredPropagationHex) {
+            bringUpPropagation(configuredPropagationHex);
+          } else {
+            // No explicit node: auto-discover the closest lxmf.propagation
+            // announce on the mesh and configure it once heard. The grace
+            // window picks the fewest-hops candidate among announces heard
+            // near-simultaneously, then locks in.
+            app.debug(
+              "Propagation enabled with no node configured; auto-discovering " +
+                "the closest lxmf.propagation node via announces",
+            );
+            const stopPropagationDiscovery = deps.discoverClosestNode({
+              rns,
+              nameHashesHex: aspectNameHashesHex([PROPAGATION_ASPECT]),
+              onSelect: (hex) => {
+                app.debug(
+                  `Auto-discovered LXMF propagation node ${hex}; configuring`,
+                );
+                bringUpPropagation(hex);
+              },
+              log: app.debug,
+            });
+            unsubscribes.push(stopPropagationDiscovery);
           }
         }
 
@@ -867,17 +941,25 @@ module.exports = (app) => {
         // its own `rfed.delivery` destination (separate from the LXMF
         // router), so it works whether or not messaging came up.
         if (config && config.rfed && config.rfed.enabled) {
-          const rfedNodeHex = normalizeNodeHash(config.rfed.node);
+          const rawRfedNode = config.rfed.node;
+          const configuredRfedHex = normalizeNodeHash(rawRfedNode);
+          if (rawRfedNode && !configuredRfedHex) {
+            app.debug(
+              `Configured RFed node "${rawRfedNode}" is not a valid destination hash; falling back to auto-discovery`,
+            );
+          }
           const rfedChannel = effectiveChannel(config.rfed.channel);
           const rfedTransmit = !!config.rfed.transmit_telemetry;
           const rfedReceive = !!config.rfed.receive_telemetry;
           const selfIdentityHashHex = toHex(plugin.identity.identityHash);
           const selfMmsi = readString(readSelf(app, "mmsi"));
-          if (!rfedNodeHex) {
-            app.debug(
-              "RFed enabled but no valid node destination hash configured",
-            );
-          } else {
+          /**
+           * Brings up the RFed client against `nodeHex`: announces our
+           * `rfed.delivery` destination, subscribes to the channel, and (when
+           * transmit is on) schedules the snapshot publisher. Errors are
+           * logged and never thrown.
+           */
+          const bringUpRfed = async (nodeHex) => {
             try {
               // Skip our own published echo so we do not create a duplicate
               // vessel target of ourselves on the chart. The strict
@@ -902,7 +984,7 @@ module.exports = (app) => {
               const rfedSetup = await setupRFed(
                 rns,
                 plugin.identity,
-                { nodeHashHex: rfedNodeHex, channel: rfedChannel },
+                { nodeHashHex: nodeHex, channel: rfedChannel },
                 onRFedMessage,
                 app.debug,
               );
@@ -915,7 +997,7 @@ module.exports = (app) => {
               if (rfedTransmit) {
                 const publishShip = makeShipTelemetryPublisher(
                   rfedSetup.client,
-                  rfedNodeHex,
+                  nodeHex,
                   rfedChannel,
                 );
                 const rawInterval = Number(config.rfed.interval_seconds);
@@ -946,6 +1028,35 @@ module.exports = (app) => {
             } catch (e) {
               app.debug(`RFed setup error: ${e.message}`);
             }
+          };
+          if (configuredRfedHex) {
+            await bringUpRfed(configuredRfedHex);
+          } else {
+            // No explicit node: auto-discover the closest rfed federation
+            // node from its announce on the mesh (other boats'
+            // rfed.delivery announces are ignored) and bring up the client
+            // once heard. The grace window picks the fewest-hops candidate
+            // among announces heard near-simultaneously, then locks in.
+            app.debug(
+              "RFed enabled with no node configured; auto-discovering " +
+                "the closest rfed federation node via announces",
+            );
+            const stopRfedDiscovery = deps.discoverClosestNode({
+              rns,
+              nameHashesHex: aspectNameHashesHex(RFED_NODE_ASPECTS),
+              onSelect: (hex) => {
+                app.debug(
+                  `Auto-discovered RFed federation node ${hex}; bringing up the client`,
+                );
+                // Return the promise so a caller (or test) can await setup,
+                // while still never throwing into the transport event loop.
+                return bringUpRfed(hex).catch((e) =>
+                  app.debug(`RFed setup error: ${e.message}`),
+                );
+              },
+              log: app.debug,
+            });
+            unsubscribes.push(stopRfedDiscovery);
           }
         }
 

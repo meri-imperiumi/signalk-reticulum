@@ -334,11 +334,12 @@ function buildPluginSchema(interfaces) {
             title: "Propagation node destination hash",
             description:
               "The 32-character hexadecimal lxmf.propagation destination hash " +
-              "of the propagation node to use as a store-and-forward client.",
+              "of the propagation node to use as a store-and-forward client. " +
+              "Leave empty to auto-discover the closest propagation node from " +
+              "its announce on the mesh (the fewest-hops lxmf.propagation " +
+              "announce heard shortly after start is used automatically).",
             default: "",
-            pattern: "^[0-9a-fA-F]{32}$",
-            minLength: 32,
-            maxLength: 32,
+            pattern: "^([0-9a-fA-F]{32})?$",
           },
           sync_interval_minutes: {
             type: "number",
@@ -494,11 +495,12 @@ function buildPluginSchema(interfaces) {
               "Any 32-character hexadecimal rfed.* destination hash of the " +
               "rfed federation node to subscribe to and publish through (they " +
               "all share one identity). Find it from the federation node's " +
-              "announce.",
+              "announce. Leave empty to auto-discover the closest federation " +
+              "node from its announce on the mesh (the fewest-hops rfed.* " +
+              "announce heard shortly after start is used automatically; " +
+              "other boats' rfed.delivery announces are ignored).",
             default: "",
-            pattern: "^[0-9a-fA-F]{32}$",
-            minLength: 32,
-            maxLength: 32,
+            pattern: "^([0-9a-fA-F]{32})?$",
           },
           channel: {
             type: "string",
