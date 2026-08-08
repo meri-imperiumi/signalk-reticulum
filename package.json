@@ -1,6 +1,6 @@
 {
   "name": "@meri-imperiumi/signalk-reticulum",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Signal K integration with the Reticulum mesh network",
   "main": "plugin/index.js",
   "scripts": {
