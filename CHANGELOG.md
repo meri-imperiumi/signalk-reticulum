@@ -1,5 +1,5 @@
 # Changelog
-## [Unreleased]
+## [0.3.1] - 2026-08-07
 ### Added
 - Reticulum status to Signal K: the plugin now publishes periodic mesh status information to Signal K under the `communication.reticulum.*` paths, similar to how `signalk-meshtastic` exposes node information. Published every 60 seconds and includes: `identityHash` (the node's unique 32-hex identifier), `displayName` (the announced name), `interfacesConnected` (count of online interfaces), `links` (number of active transport connections; ephemeral, non-zero only during active exchanges), `destinationsKnown` (number of remote destinations in the routing table), `bytesReceived`/`bytesTransmitted` (total traffic counters aggregated across all interfaces), and `interfaces` (array of interface objects with `name`, `type`, `online`, `bitrate` for each interface). Per-interface traffic statistics are also published under `communication.reticulum.interfaces.<name>.bytesReceived`/`bytesTransmitted`. Metadata (display names, descriptions, units) is published on startup for instrumentation
 
