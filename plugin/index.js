@@ -61,6 +61,7 @@ const {
   discoverClosestNode,
 } = require("./discovery");
 const commands = require("./commands");
+const { formatStatusValues, getStatusMetadata } = require("./status");
 
 /**
  * Overridable dependencies (the Reticulum orchestrator class, the interface
@@ -756,6 +757,55 @@ module.exports = (app) => {
         // to, so instruments render them correctly. Idempotent and safe to
         // call even when messaging did not come up.
         sendInboundTelemetryMeta(app);
+
+        // Publish Reticulum status metadata on startup.
+        const statusMetadata = getStatusMetadata();
+        app.handleMessage("signalk-reticulum", {
+          updates: [
+            {
+              meta: statusMetadata,
+            },
+          ],
+        });
+
+        // Periodically publish Reticulum status (every 60 seconds). This
+        // includes interface status, link counts, destination table size,
+        // and LXMF peer count.
+        const statusIntervalMs = 60000;
+        const publishStatus = () => {
+          try {
+            const values = formatStatusValues(
+              rns,
+              plugin.lxmf,
+              plugin.nomadnet,
+              plugin.rfed,
+              plugin.identity,
+              displayName,
+            );
+            app.handleMessage("signalk-reticulum", {
+              context: "vessels.self",
+              updates: [
+                {
+                  source: {
+                    label: "signalk-reticulum",
+                    src: hashHex,
+                  },
+                  timestamp: new Date().toISOString(),
+                  values,
+                },
+              ],
+            });
+          } catch (e) {
+            app.debug(`Status publish error: ${e.message}`);
+          }
+        };
+        // Publish shortly after start, then on the recurring timer.
+        const initialStatus = setTimeout(publishStatus, 5000);
+        const statusTimer = setInterval(publishStatus, statusIntervalMs);
+        unsubscribes.push(() => {
+          clearTimeout(initialStatus);
+          clearInterval(statusTimer);
+        });
 
         // --- LXMF store-and-forward (propagation-node client) --------------
         // The node acts as a *client* of an external LXMF propagation node:

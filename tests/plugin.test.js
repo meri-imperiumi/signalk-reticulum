@@ -1306,22 +1306,37 @@ test("start configures the propagation node and schedules periodic syncs", async
       ),
     );
 
-    // A sync timer (initial + interval) is scheduled.
-    assert.equal(
-      scheduled.filter((s) => s.kind === "timeout").length,
-      1,
-      "initial sync scheduled",
+    // A sync timer (initial + interval) is scheduled (plus the status timer).
+    assert.ok(
+      scheduled.filter((s) => s.kind === "timeout").length >= 1,
+      "timers scheduled",
     );
-    const interval = scheduled.find((s) => s.kind === "interval");
-    assert.ok(interval, "recurring sync scheduled");
+    const intervals = scheduled.filter((s) => s.kind === "interval");
+    assert.ok(intervals.length >= 1, "at least one interval scheduled");
 
-    // Firing the initial sync drives syncFromPropagationNode.
+    // Find the sync timeout by trying each one and checking which increments syncCalls.
     assert.equal(plugin.lxmf.syncCalls, 0);
-    await scheduled.find((s) => s.kind === "timeout").fn();
+    let foundSync = false;
+    for (const s of scheduled.filter((t) => t.kind === "timeout")) {
+      await s.fn();
+      if (plugin.lxmf.syncCalls > 0) {
+        foundSync = true;
+        break;
+      }
+    }
+    assert.ok(foundSync, "initial sync found and ran");
     assert.equal(plugin.lxmf.syncCalls, 1, "initial sync ran");
 
-    // Firing the recurring sync drives it again.
-    await interval.fn();
+    // Find and fire the recurring sync interval (the one that increments syncCalls).
+    let foundInterval = false;
+    for (const s of intervals) {
+      await s.fn();
+      if (plugin.lxmf.syncCalls > 1) {
+        foundInterval = true;
+        break;
+      }
+    }
+    assert.ok(foundInterval, "recurring sync found and ran");
     assert.equal(plugin.lxmf.syncCalls, 2, "recurring sync ran");
   } finally {
     globalThis.setTimeout = origSetTimeout;
@@ -1623,7 +1638,16 @@ test("start does not schedule telemetry when the option is disabled", async () =
         { name: "Alice", destination: "0123456789abcdef0123456789abcdef" },
       ],
     });
-    assert.equal(scheduled.length, 0, "no telemetry timer scheduled");
+    // Status timer is always scheduled, but no telemetry timer.
+    assert.ok(scheduled.length >= 2, "status timers scheduled (no telemetry)");
+    // Verify none of the scheduled timers send telemetry messages.
+    for (const fn of scheduled) {
+      await fn();
+    }
+    assert.ok(
+      !plugin.lxmf || plugin.lxmf.sent.length === 0,
+      "no telemetry messages sent",
+    );
   } finally {
     globalThis.setTimeout = origSetTimeout;
     globalThis.setInterval = origSetInterval;
@@ -1662,8 +1686,13 @@ test("start schedules and fires a telemetry broadcast to the crew when enabled",
     assert.equal(router.sent.length, 0, "nothing sent before the timer fires");
     assert.ok(scheduled.length >= 1, "a telemetry timer was scheduled");
 
-    // Fire the captured telemetry callback (the initial send).
-    await scheduled[0]();
+    // Find and fire the telemetry callback (the one that sends a message).
+    for (const fn of scheduled) {
+      await fn();
+      if (router.sent.length > 0) {
+        break;
+      }
+    }
 
     assert.equal(router.sent.length, 1, "one telemetry snapshot sent");
     const fields = router.sent[0].message.options.fields;
@@ -1714,7 +1743,13 @@ test("telemetry broadcast carries the derived appearance (icon + colors)", async
       crew: [{ name: "Alice", destination: dest }],
     });
 
-    await scheduled[0]();
+    // Find and fire the telemetry callback.
+    for (const fn of scheduled) {
+      await fn();
+      if (plugin.lxmf.sent.length > 0) {
+        break;
+      }
+    }
 
     const fields = plugin.lxmf.sent[0].message.options.fields;
     const appearance = fields.get(0x04);
@@ -1762,7 +1797,13 @@ test("telemetry broadcast uses the ferry icon for a motor vessel", async () => {
       crew: [{ name: "Alice", destination: dest }],
     });
 
-    await scheduled[0]();
+    // Find and fire the telemetry callback.
+    for (const fn of scheduled) {
+      await fn();
+      if (plugin.lxmf.sent.length > 0) {
+        break;
+      }
+    }
 
     const fields = plugin.lxmf.sent[0].message.options.fields;
     assert.equal(fields.get(0x04)[0], "ferry");
