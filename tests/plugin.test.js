@@ -625,7 +625,8 @@ test("schema exposes messaging and crew configuration groups", () => {
   assert.equal(crewGroup.type, "array");
   // Crew members are configured by their protocol-agnostic Reticulum identity
   // hash; the lxmf.delivery destination hash is derived from it.
-  assert.deepEqual(crewGroup.items.required, ["name", "identity"]);
+  // Only 'name' is required (identity is optional for legacy config support).
+  assert.deepEqual(crewGroup.items.required, ["name"]);
   assert.equal(
     crewGroup.items.properties.identity.pattern,
     "^[0-9a-fA-F]{32}$",

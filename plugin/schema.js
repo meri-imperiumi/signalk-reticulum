@@ -281,7 +281,7 @@ function buildPluginSchema(interfaces) {
         default: [],
         items: {
           type: "object",
-          required: ["name", "identity"],
+          required: ["name"],
           properties: {
             name: {
               type: "string",
@@ -299,6 +299,19 @@ function buildPluginSchema(interfaces) {
                 "be reached over other identity-based protocols without " +
                 "reconfiguration. Find it in NomadNet/Sideband under the " +
                 "peer's details (often labelled 'the hash').",
+              pattern: "^[0-9a-fA-F]{32}$",
+              minLength: 32,
+              maxLength: 32,
+            },
+            destination: {
+              type: "string",
+              title: "LXMF destination hash (legacy)",
+              description:
+                "Legacy field: a raw lxmf.delivery destination hash. " +
+                "This is deprecated — use 'identity' instead for protocol-agnostic " +
+                "configuration. Entries with 'destination' but no 'identity' are " +
+                "supported for backward compatibility, but they can only be " +
+                "reached over LXMF, not other identity-based protocols.",
               pattern: "^[0-9a-fA-F]{32}$",
               minLength: 32,
               maxLength: 32,

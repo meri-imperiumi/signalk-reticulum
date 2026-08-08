@@ -191,3 +191,39 @@ test("buildPluginSchema exposes an announce group with a 30-minute default", () 
   ]);
   assert.equal(paths.items.type, "string");
 });
+
+test("buildPluginSchema crew items support both identity and destination", () => {
+  const schema = buildPluginSchema([]);
+  const crew = schema.properties.crew;
+
+  assert.equal(crew.type, "array");
+  assert.deepEqual(crew.default, []);
+
+  // Only name is required (identity is optional for legacy config support)
+  assert.deepEqual(crew.items.required, ["name"]);
+
+  // Both identity and destination are valid properties
+  assert.ok("name" in crew.items.properties);
+  assert.ok("identity" in crew.items.properties);
+  assert.ok("destination" in crew.items.properties);
+
+  // No additional properties allowed
+  assert.equal(crew.items.additionalProperties, false);
+
+  // Both identity and destination use the same 32-char hex pattern
+  const identity = crew.items.properties.identity;
+  const destination = crew.items.properties.destination;
+
+  assert.equal(identity.type, "string");
+  assert.equal(identity.pattern, "^[0-9a-fA-F]{32}$");
+  assert.equal(identity.minLength, 32);
+  assert.equal(identity.maxLength, 32);
+
+  assert.equal(destination.type, "string");
+  assert.equal(destination.pattern, "^[0-9a-fA-F]{32}$");
+  assert.equal(destination.minLength, 32);
+  assert.equal(destination.maxLength, 32);
+
+  // Destination is marked as legacy
+  assert(destination.title.includes("legacy"));
+});
