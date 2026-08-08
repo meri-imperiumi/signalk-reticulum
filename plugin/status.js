@@ -34,12 +34,12 @@ function getInterfaceStats(iface) {
  * Gathers all relevant status information from a Reticulum node.
  *
  * @param {object} rns - The Reticulum node instance
- * @param {object} [lxmf] - Optional LXMF router instance
- * @param {object} [nomadnet] - Optional NomadNet site instance
- * @param {object} [rfed] - Optional RFed client instance
+ * @param {object} [_lxmf] - Optional LXMF router instance
+ * @param {object} [_nomadnet] - Optional NomadNet site instance
+ * @param {object} [_rfed] - Optional RFed client instance
  * @param {object} [identity] - Optional Reticulum identity instance
  * @param {string} [displayName] - Optional display name
- * @returns {{identityHash: string, displayName: string, interfaces: object[], links: number, destinationsKnown: number, lxmfPeers: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number}}
+ * @returns {{identityHash: string, displayName: string, interfaces: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number}}
  */
 function getStatus(rns, _lxmf, _nomadnet, _rfed, identity, displayName) {
   const interfaces = [];
@@ -62,24 +62,16 @@ function getStatus(rns, _lxmf, _nomadnet, _rfed, identity, displayName) {
   }
 
   let links = 0;
-  if (rns?.transport?.links) {
-    links = rns.transport.links.size;
+  // activeLinks is a Map of established transport connections
+  // These are ephemeral and exist only during active exchanges
+  if (rns?.transport?.activeLinks) {
+    links = rns.transport.activeLinks.size;
   }
 
   let destinationsKnown = 0;
-  if (rns?.transport?.pathTable?.size) {
-    destinationsKnown = rns.transport.pathTable.size;
-  }
-
-  let lxmfPeers = 0;
-  // Count LXMF delivery destinations we've learned (peers that announced lxmf.delivery)
-  if (rns?.transport?.pathTable?.size) {
-    for (const entry of rns.transport.pathTable.values()) {
-      const name = entry?.appData?.name || "";
-      if (name.startsWith("lxmf.delivery")) {
-        lxmfPeers += 1;
-      }
-    }
+  // The routing table contains learned destinations from announces
+  if (rns?.transport?.routingTable?.routes) {
+    destinationsKnown = rns.transport.routingTable.routes.size;
   }
 
   return {
@@ -88,7 +80,6 @@ function getStatus(rns, _lxmf, _nomadnet, _rfed, identity, displayName) {
     interfaces,
     links,
     destinationsKnown,
-    lxmfPeers,
     interfacesConnected,
     bytesReceived,
     bytesTransmitted,
@@ -129,10 +120,7 @@ function formatStatusValues(rns, lxmf, nomadnet, rfed, identity, displayName) {
       path: "communication.reticulum.destinationsKnown",
       value: status.destinationsKnown,
     },
-    {
-      path: "communication.reticulum.lxmfPeers",
-      value: status.lxmfPeers,
-    },
+
     {
       path: "communication.reticulum.bytesReceived",
       value: status.bytesReceived,
@@ -203,8 +191,9 @@ function getStatusMetadata() {
     {
       path: "communication.reticulum.links",
       value: {
-        displayName: "Links",
-        description: "Number of active mesh links to peer nodes",
+        displayName: "Active links",
+        description:
+          "Number of active transport connections (ephemeral, non-zero only during active exchanges)",
         units: "count",
       },
     },
@@ -213,19 +202,11 @@ function getStatusMetadata() {
       value: {
         displayName: "Destinations known",
         description:
-          "Number of remote destinations in the path table (peers reachable)",
+          "Number of remote destinations in the routing table (peers reachable via announces)",
         units: "count",
       },
     },
-    {
-      path: "communication.reticulum.lxmfPeers",
-      value: {
-        displayName: "LXMF peers",
-        description:
-          "Number of LXMF delivery destinations announced on the mesh",
-        units: "count",
-      },
-    },
+
     {
       path: "communication.reticulum.interfaces",
       value: {

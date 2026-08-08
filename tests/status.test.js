@@ -18,7 +18,10 @@ test("getStatusMetadata returns metadata for all paths", () => {
   assert.ok(paths.includes("communication.reticulum.interfacesConnected"));
   assert.ok(paths.includes("communication.reticulum.links"));
   assert.ok(paths.includes("communication.reticulum.destinationsKnown"));
-  assert.ok(paths.includes("communication.reticulum.lxmfPeers"));
+  assert.ok(
+    !paths.includes("communication.reticulum.lxmfPeers"),
+    "lxmfPeers is not exposed",
+  );
   assert.ok(paths.includes("communication.reticulum.interfaces"));
 
   // Check that each metadata entry has required fields
@@ -70,12 +73,17 @@ test("formatStatusValues extracts interface info", () => {
           txb: 0,
         },
       ]),
-      links: new Set([{}, {}]), // 2 links
-      pathTable: new Map([
-        ["dest1", {}],
-        ["dest2", {}],
-        ["lxmf.delivery.peer1", { appData: { name: "lxmf.delivery.peer1" } }],
-      ]),
+      activeLinks: new Map([
+        ["link1", {}],
+        ["link2", {}],
+      ]), // 2 links
+      routingTable: {
+        routes: new Map([
+          ["dest1", {}],
+          ["dest2", {}],
+          ["lxmf.delivery.peer1", {}],
+        ]),
+      },
     },
   };
 
@@ -115,12 +123,6 @@ test("formatStatusValues extracts interface info", () => {
     (v) => v.path === "communication.reticulum.destinationsKnown",
   );
   assert.equal(destinationsKnown.value, 3); // all 3 entries
-
-  // Check LXMF peers
-  const lxmfPeers = values.find(
-    (v) => v.path === "communication.reticulum.lxmfPeers",
-  );
-  assert.equal(lxmfPeers.value, 1); // only peer1 is an lxmf.delivery
 
   // Check total bytes
   const bytesReceived = values.find(
@@ -164,6 +166,13 @@ test("formatStatusValues extracts interface info", () => {
       v.path === "communication.reticulum.interfaces.lora-node.bytesReceived",
   );
   assert.equal(loraRxb.value, 0);
+});
+
+test("getStatusMetadata does not include lxmfPeers", () => {
+  const metadata = getStatusMetadata();
+
+  const paths = metadata.map((m) => m.path);
+  assert.ok(!paths.includes("communication.reticulum.lxmfPeers"));
 });
 
 test("getStatusMetadata includes bytesReceived and bytesTransmitted", () => {
