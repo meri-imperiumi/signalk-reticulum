@@ -11,17 +11,45 @@
 const { toHex } = require("@reticulum/core");
 
 /**
+ * Sanitizes a free-form Reticulum interface name into a stable, path-safe
+ * identifier for use as a Signal K path segment.
+ *
+ * Signal K path segments must not contain whitespace or punctuation, but a
+ * Reticulum interface name is free-form text (e.g. "Lille Oe NAS") and so
+ * cannot be used verbatim — doing so produces broken paths like
+ * `communication.reticulum.interfaces.Lille Oe NAS.bytesReceived`. Any run of
+ * characters outside `[a-zA-Z0-9]` (spaces, dots, dashes, slashes, …) collapses
+ * to a single underscore, leading/trailing underscores are trimmed, and an
+ * empty result falls back to `"interface"` so the segment is never empty.
+ *
+ * This is an id *derived from the name*, not the name itself: the human-readable
+ * `name` is still published verbatim in the `interfaces` array value so
+ * dashboards can display it.
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+function sanitizePathSegment(raw) {
+  const cleaned = String(raw || "")
+    .replace(/[^a-zA-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return cleaned || "interface";
+}
+
+/**
  * Extracts relevant statistics from a Reticulum interface.
  *
  * @param {object} iface - Reticulum interface instance
- * @returns {{name: string, type: string, online: boolean, bitrate: number, rxb: number, txb: number}|null}
+ * @returns {{id: string, name: string, type: string, online: boolean, bitrate: number, rxb: number, txb: number}|null}
  */
 function getInterfaceStats(iface) {
   if (!iface) {
     return null;
   }
+  const name = iface.name || "unknown";
   return {
-    name: iface.name || "unknown",
+    id: sanitizePathSegment(name),
+    name,
     type: iface.constructor?.name || "unknown",
     online: !!iface.online,
     bitrate: Number(iface.bitrate) || 0,
@@ -68,6 +96,22 @@ function getStatus(
         bytesTransmitted += stats.txb;
       }
     }
+  }
+
+  // Ensure each interface has a unique path-safe id so the per-interface
+  // Signal K paths never collide when two names sanitize to the same segment
+  // (e.g. "Lille Oe" and "Lille.Oe" both → "Lille_Oe"). The first occurrence
+  // keeps its base id; later collisions get a `_2`, `_3`, … suffix.
+  const usedIds = new Set();
+  for (const stats of interfaces) {
+    let id = stats.id;
+    if (usedIds.has(id)) {
+      let n = 2;
+      while (usedIds.has(`${id}_${n}`)) n += 1;
+      id = `${id}_${n}`;
+    }
+    usedIds.add(id);
+    stats.id = id;
   }
 
   let links = 0;
@@ -182,24 +226,29 @@ function formatStatusValues(
     {
       path: "communication.reticulum.interfaces",
       value: status.interfaces.map((iface) => ({
+        id: iface.id,
         name: iface.name,
         type: iface.type,
         online: iface.online,
         bitrate: iface.bitrate,
+        bytesReceived: iface.rxb,
+        bytesTransmitted: iface.txb,
       })),
     },
   ];
 
-  // Add per-interface traffic stats
+  // Add per-interface traffic stats. The path segment is the interface's
+  // sanitized id (see sanitizePathSegment) — never the free-form name — so a
+  // name with whitespace or special characters (e.g. "Lille Oe NAS") cannot
+  // produce an invalid Signal K path.
   for (const iface of status.interfaces) {
-    const escapedName = iface.name.replace(/\./g, "_");
     values.push(
       {
-        path: `communication.reticulum.interfaces.${escapedName}.bytesReceived`,
+        path: `communication.reticulum.interfaces.${iface.id}.bytesReceived`,
         value: iface.rxb,
       },
       {
-        path: `communication.reticulum.interfaces.${escapedName}.bytesTransmitted`,
+        path: `communication.reticulum.interfaces.${iface.id}.bytesTransmitted`,
         value: iface.txb,
       },
     );
@@ -285,7 +334,11 @@ function getStatusMetadata() {
       path: "communication.reticulum.interfaces",
       value: {
         displayName: "Interfaces",
-        description: "List of all Reticulum interfaces and their status",
+        description:
+          "List of all Reticulum interfaces and their status. Each entry " +
+          "carries a path-safe id (used as the per-interface path segment), " +
+          "the human-readable name, type, online flag, bitrate and " +
+          "bytesReceived/bytesTransmitted traffic counters.",
         type: "array",
       },
     },
@@ -354,6 +407,7 @@ function getStatusMetadata() {
 }
 
 module.exports = {
+  sanitizePathSegment,
   getInterfaceStats,
   getStatus,
   formatStatusValues,
