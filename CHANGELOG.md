@@ -1,5 +1,5 @@
 # Changelog
-## [Unreleased]
+## [0.4.0] - 2026-08-08
 
 ### Added
 - **Embedded LXMF propagation node and RFed federation node**: The plugin can now run an LXMF propagation node and/or an RFed federation node directly inside the plugin process, sharing the Reticulum instance and identity with the rest of the plugin. This provides store-and-forward messaging and channel telemetry services to the mesh without requiring external nodes. Both are enabled by default. When an embedded node is running, the plugin uses it instead of looking for an external node. Configuration is available under the new `embedded_nodes` config group with options for:
