@@ -119,7 +119,7 @@ test("buildPluginSchema places one instance array per non-excluded interface bet
   // Non-interface groups bookend the interface arrays.
   assert.equal(keys[0], "log_level");
   assert.equal(keys[1], "use_shared_instance");
-  assert.equal(keys[keys.length - 1], "appearance");
+  assert.equal(keys[keys.length - 1], "embedded_nodes");
 
   // The interface arrays land between use_shared_instance and the announce
   // group, in registry order, excluding WebRTC.

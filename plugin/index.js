@@ -41,6 +41,10 @@ const {
   makePropagationDeliverer,
   makeAutoDeliverer,
 } = require("./propagation");
+const {
+  setupEmbeddedPropagationNode,
+  setupEmbeddedRFedNode,
+} = require("./embedded-nodes");
 const { effectiveCrew } = require("./notifications");
 const { buildTelemetrySensors, packTelemetry } = require("./telemetry");
 const {
@@ -51,6 +55,7 @@ const {
   effectiveChannel,
   encodeShipTelemetry,
   makeShipTelemetryPublisher,
+  pullDeferredMessages,
   setupRFed,
   handleInboundShipTelemetry,
 } = require("./rfed");
@@ -431,6 +436,14 @@ module.exports = (app) => {
      * inbound fanout messages can be inspected / driven in tests.
      */
     rfed: undefined,
+    /**
+     * The embedded LXMF propagation node (available after start when enabled).
+     */
+    embeddedPropagation: undefined,
+    /**
+     * The embedded RFed federation node (available after start when enabled).
+     */
+    embeddedRfed: undefined,
 
     /**
      * Resolves (or generates) the identity, brings up the Reticulum node and
@@ -758,6 +771,212 @@ module.exports = (app) => {
         // call even when messaging did not come up.
         sendInboundTelemetryMeta(app);
 
+        // --- Embedded nodes ----------------------------------------------
+        // Set up embedded LXMF propagation node and/or RFed federation node
+        // if enabled. When an embedded node is running, we use it instead of
+        // looking for an external node.
+        const dataDirPath =
+          typeof app.getDataDirPath === "function"
+            ? app.getDataDirPath()
+            : null;
+        const embeddedNodesConfig = config && config.embedded_nodes;
+        const embeddedPropagationEnabled =
+          embeddedNodesConfig &&
+          embeddedNodesConfig.propagation &&
+          embeddedNodesConfig.propagation.enabled !== false;
+        const embeddedRfedEnabled =
+          embeddedNodesConfig &&
+          embeddedNodesConfig.rfed &&
+          embeddedNodesConfig.rfed.enabled !== false;
+
+        if (embeddedPropagationEnabled && plugin.lxmf) {
+          try {
+            const embeddedProp = await setupEmbeddedPropagationNode({
+              lxmf: plugin.lxmf,
+              config,
+              dataDir: dataDirPath,
+              log: app.debug,
+            });
+            plugin.embeddedPropagation = embeddedProp.node;
+            if (embeddedProp.node) {
+              unsubscribes.push(embeddedProp.teardown);
+              app.debug("Embedded LXMF propagation node started");
+
+              // Periodically sync messages from the embedded propagation node
+              // (messages stored for this node while it was offline)
+              const syncIntervalMs = 5 * 60 * 1000; // 5 minutes
+              const syncOnce = () => {
+                syncFromNode(plugin.lxmf, plugin.identity, app.debug).catch(
+                  (e) =>
+                    app.debug(`Embedded propagation sync error: ${e.message}`),
+                );
+              };
+              // Initial sync after 10 seconds
+              const initialSync = setTimeout(syncOnce, 10000);
+              const syncTimer = setInterval(syncOnce, syncIntervalMs);
+              unsubscribes.push(() => {
+                clearTimeout(initialSync);
+                clearInterval(syncTimer);
+              });
+            }
+          } catch (e) {
+            app.debug(`Embedded propagation node setup error: ${e.message}`);
+          }
+        }
+
+        if (embeddedRfedEnabled) {
+          try {
+            const embeddedRfed = await setupEmbeddedRFedNode({
+              rns,
+              identity: plugin.identity,
+              config,
+              dataDir: dataDirPath,
+              log: app.debug,
+            });
+            plugin.embeddedRfed = embeddedRfed.node;
+            if (embeddedRfed.node) {
+              unsubscribes.push(embeddedRfed.teardown);
+              app.debug("Embedded RFed federation node started");
+
+              // When RFed receive telemetry is enabled, set up an RFedClient
+              // to subscribe to the embedded node and receive fanout
+              const rfedReceive =
+                config && config.rfed && config.rfed.receive_telemetry;
+              if (rfedReceive) {
+                const selfIdentityHashHex = toHex(plugin.identity.identityHash);
+                const selfMmsi = readString(readSelf(app, "mmsi"));
+                const rfedChannel = effectiveChannel(
+                  config && config.rfed ? config.rfed.channel : undefined,
+                );
+
+                // Set up an RFedClient that will subscribe to the embedded node
+                const { RFedClient } = require("@reticulum/core/src/rfed");
+                const rfedClient = new RFedClient({
+                  identity: plugin.identity,
+                  rns,
+                });
+                plugin.rfed = rfedClient;
+
+                const onRFedMessage = (decoded) => {
+                  handleInboundShipTelemetry(
+                    decoded,
+                    config,
+                    app,
+                    selfIdentityHashHex,
+                    selfMmsi,
+                  );
+                };
+
+                // The embedded node shares our identity, so its destinations
+                // are derived from the same identity. We can derive the
+                // node's channel.subscribe hash to use as the nodeHash.
+                const { deriveChannel, deliveryHashFor } =
+                  require("@reticulum/core/src/rfed/channel.js");
+                let nodeHash = null;
+                let channelHash = null;
+
+                // Start listening for fanout and subscribe to the channel
+                const setupClient = async () => {
+                  try {
+                    const channelDerivation = await deriveChannel(rfedChannel);
+                    channelHash = channelDerivation.channelHash;
+                    nodeHash = await deliveryHashFor(
+                      channelDerivation.identity,
+                    );
+
+                    await rfedClient.listen(onRFedMessage);
+                    app.debug(
+                      `RFed client listening for fanout on channel "${rfedChannel}"`,
+                    );
+
+                    await rfedClient.subscribe(nodeHash, rfedChannel);
+                    app.debug(
+                      `RFed client subscribed to channel "${rfedChannel}" via embedded node`,
+                    );
+                  } catch (e) {
+                    app.debug(`RFed client setup error: ${e.message}`);
+                  }
+                };
+
+                // Start after a short delay to ensure the embedded node is ready
+                const setupDelay = setTimeout(setupClient, 3000);
+                unsubscribes.push(() => clearTimeout(setupDelay));
+
+                // Periodically pull deferred messages from the embedded node
+                const pullOnce = async () => {
+                  if (!nodeHash || !channelHash) return;
+                  try {
+                    await pullDeferredMessages(
+                      rfedClient,
+                      nodeHash,
+                      rfedChannel,
+                      onRFedMessage,
+                      app.debug,
+                    );
+                  } catch (e) {
+                    app.debug(`Embedded RFed pull error: ${e.message}`);
+                  }
+                };
+                const initialPull = setTimeout(pullOnce, 15000);
+                const pullTimer = setInterval(pullOnce, 5 * 60 * 1000);
+                unsubscribes.push(() => {
+                  clearTimeout(initialPull);
+                  clearInterval(pullTimer);
+                });
+
+                // Also enable transmit if configured
+                const rfedTransmit = !!config.rfed.transmit_telemetry;
+                if (rfedTransmit && nodeHash) {
+                  const publishShip = makeShipTelemetryPublisher(
+                    rfedClient,
+                    toHex(nodeHash),
+                    rfedChannel,
+                  );
+                  const rawInterval = Number(config.rfed.interval_seconds);
+                  const rfedIntervalSec =
+                    Number.isFinite(rawInterval) && rawInterval > 0
+                      ? Math.max(30, rawInterval)
+                      : 300;
+                  const sendShipOnce = () => {
+                    try {
+                      const packed = encodeShipTelemetry(
+                        buildShipReadings(app),
+                      );
+                      if (!packed) {
+                        return;
+                      }
+                      publishShip(packed).catch((e) =>
+                        app.debug(`RFed publish error: ${e.message}`),
+                      );
+                    } catch (e) {
+                      app.debug(`RFed snapshot error: ${e.message}`);
+                    }
+                  };
+                  // Wait for nodeHash to be set
+                  const startTransmit = () => {
+                    if (nodeHash) {
+                      const initial = setTimeout(sendShipOnce, 5000);
+                      const timer = setInterval(
+                        sendShipOnce,
+                        rfedIntervalSec * 1000,
+                      );
+                      unsubscribes.push(() => {
+                        clearTimeout(initial);
+                        clearInterval(timer);
+                      });
+                    } else {
+                      setTimeout(startTransmit, 1000);
+                    }
+                  };
+                  setTimeout(startTransmit, 4000);
+                }
+              }
+            }
+          } catch (e) {
+            app.debug(`Embedded RFed node setup error: ${e.message}`);
+          }
+        }
+
         // Publish Reticulum status metadata on startup.
         const statusMetadata = getStatusMetadata();
         app.handleMessage("signalk-reticulum", {
@@ -779,6 +998,8 @@ module.exports = (app) => {
               plugin.lxmf,
               plugin.nomadnet,
               plugin.rfed,
+              plugin.embeddedPropagation,
+              plugin.embeddedRfed,
               plugin.identity,
               displayName,
             );
@@ -811,7 +1032,9 @@ module.exports = (app) => {
         // The node acts as a *client* of an external LXMF propagation node:
         // it pulls messages the node is holding for it (receiving) and submits
         // outbound messages to the node when a recipient can't be reached
-        // directly (sending). The node never runs the propagation role itself.
+        // directly (sending). When an embedded propagation node is running,
+        // we skip this section entirely and use the embedded node instead.
+        //
         // Alerts default to the direct deliverer above; when a propagation
         // node is configured (or auto-discovered) the direct deliverer is
         // wrapped so a recipient with no known path is reached via
@@ -823,7 +1046,12 @@ module.exports = (app) => {
         // closure wires up persistence, the periodic sync, and the
         // direct-first / propagation-fallback deliverer.
         alertDeliver = deliver;
-        if (config && config.propagation && config.propagation.enabled) {
+        if (
+          config &&
+          config.propagation &&
+          config.propagation.enabled &&
+          !plugin.embeddedPropagation
+        ) {
           const rawPropagationNode = config.propagation.node;
           const configuredPropagationHex =
             normalizeNodeHash(rawPropagationNode);
@@ -987,10 +1215,17 @@ module.exports = (app) => {
         // federation node. Each boat publishes its own AIS-like snapshot
         // (static vessel info + dynamic navigation + basic weather) to a
         // channel, and received boats are populated as Signal K vessel
-        // targets. Transmit and receive are independent opt-ins. RFed runs on
-        // its own `rfed.delivery` destination (separate from the LXMF
-        // router), so it works whether or not messaging came up.
-        if (config && config.rfed && config.rfed.enabled) {
+        // targets. Transmit and receive are independent opt-ins. When an
+        // embedded RFed node is running, we use it instead of looking for
+        // an external node. RFed runs on its own `rfed.delivery` destination
+        // (separate from the LXMF router), so it works whether or not
+        // messaging came up.
+        if (
+          config &&
+          config.rfed &&
+          config.rfed.enabled &&
+          !plugin.embeddedRfed
+        ) {
           const rawRfedNode = config.rfed.node;
           const configuredRfedHex = normalizeNodeHash(rawRfedNode);
           if (rawRfedNode && !configuredRfedHex) {
@@ -1040,6 +1275,30 @@ module.exports = (app) => {
               );
               unsubscribes.push(rfedSetup.teardown);
               plugin.rfed = rfedSetup.client;
+
+              // Receive: periodically pull deferred messages from the RFed node
+              // (messages that weren't fanout-delivered because we were offline).
+              // Pull continues until no more pending messages.
+              if (rfedReceive) {
+                const pullOnce = () => {
+                  pullDeferredMessages(
+                    rfedSetup.client,
+                    RNS.fromHex(nodeHex),
+                    rfedChannel,
+                    onRFedMessage,
+                    app.debug,
+                  ).catch((e) => app.debug(`RFed pull error: ${e.message}`));
+                };
+                // Initial pull shortly after start to catch messages stored
+                // while we were offline.
+                const initialPull = setTimeout(pullOnce, 10000);
+                // Periodic pull every 5 minutes to catch deferred messages.
+                const pullTimer = setInterval(pullOnce, 5 * 60 * 1000);
+                unsubscribes.push(() => {
+                  clearTimeout(initialPull);
+                  clearInterval(pullTimer);
+                });
+              }
 
               // Transmit: publish a vessel snapshot to the channel on the
               // configured interval (one shortly after start so peers see us
@@ -1329,6 +1588,8 @@ module.exports = (app) => {
       plugin.lxmf = undefined;
       plugin.nomadnet = undefined;
       plugin.rfed = undefined;
+      plugin.embeddedPropagation = undefined;
+      plugin.embeddedRfed = undefined;
       plugin.identity = undefined;
       plugin.rns = undefined;
       plugin.interfaces = [];

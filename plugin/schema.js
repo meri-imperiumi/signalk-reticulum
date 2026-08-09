@@ -614,6 +614,243 @@ function buildPluginSchema(interfaces) {
         },
         additionalProperties: false,
       },
+      embedded_nodes: {
+        type: "object",
+        title: "Embedded nodes",
+        description:
+          "Run an LXMF propagation node and/or an RFed federation node " +
+          "directly inside this plugin. When enabled, the plugin provides " +
+          "store-and-forward messaging and channel telemetry services to " +
+          "the mesh without requiring external nodes. The embedded nodes " +
+          "share the same Reticulum instance and identity with the rest of " +
+          "the plugin, and their state survives restarts via disk " +
+          "persistence. When an embedded node is running, the plugin uses " +
+          "it instead of looking for an external node.",
+        properties: {
+          propagation: {
+            type: "object",
+            title: "LXMF propagation node",
+            description:
+              "Embedded LXMF propagation node configuration. When enabled, " +
+              "the plugin runs an lxmf.propagation node that stores messages " +
+              "for mesh clients until they sync. This replaces the need for " +
+              "an external propagation node (the propagation.enabled setting " +
+              "is ignored when this is enabled).",
+            properties: {
+              enabled: {
+                type: "boolean",
+                title: "Run embedded LXMF propagation node",
+                description:
+                  "When enabled, the plugin runs its own LXMF propagation " +
+                  "node. The node stores messages for mesh clients and " +
+                  "delivers them when the clients sync. On by default.",
+                default: true,
+              },
+              name: {
+                type: "string",
+                title: "Propagation node name",
+                description:
+                  "Display name announced for this propagation node. " +
+                  "Defaults to the vessel's LXMF display name.",
+                default: "",
+              },
+              stamp_cost: {
+                type: "number",
+                title: "Stamp cost (bits)",
+                description:
+                  "Proof-of-work leading-zero bits required for messages " +
+                  "submitted to this propagation node. Set to 0 to disable. " +
+                  "Defaults to 8 bits.",
+                default: 8,
+                minimum: 0,
+                maximum: 32,
+              },
+              peering_cost: {
+                type: "number",
+                title: "Peering cost (bits)",
+                description:
+                  "Cost advertised to other propagation nodes for peering " +
+                  "requests. Higher values discourage peering. Defaults to " +
+                  "18 bits.",
+                default: 18,
+                minimum: 0,
+                maximum: 32,
+              },
+              autopeer: {
+                type: "boolean",
+                title: "Auto-peer with other propagation nodes",
+                description:
+                  "When enabled, automatically peer with other discovered " +
+                  "propagation nodes whose peering cost is at or below the " +
+                  "max cost. Off by default.",
+                default: false,
+              },
+              autopeer_max_cost: {
+                type: "number",
+                title: "Auto-peer max cost (bits)",
+                description:
+                  "Maximum peering cost for auto-peering. Only propagation " +
+                  "nodes advertising a cost at or below this value are " +
+                  "auto-peered with. Ignored when auto-peer is disabled.",
+                default: 18,
+                minimum: 0,
+                maximum: 32,
+              },
+              storage_limit_mb: {
+                type: "number",
+                title: "Storage limit (MB)",
+                description:
+                  "Maximum storage for stored LXMF messages. Old messages " +
+                  "are evicted when the limit is reached. Leave empty for " +
+                  "unlimited.",
+                default: null,
+                minimum: 1,
+              },
+              message_ttl_days: {
+                type: "number",
+                title: "Message TTL (days)",
+                description:
+                  "Maximum age for stored LXMF messages. Old messages are " +
+                  "pruned regardless of storage limit. Leave empty for " +
+                  "unlimited.",
+                default: null,
+                minimum: 1,
+              },
+              peers: {
+                type: "array",
+                title: "Static propagation peers",
+                description:
+                  "List of 32-character hexadecimal destination hashes of " +
+                  "propagation nodes to sync with periodically. Messages " +
+                  "are exchanged on sync. Leave empty for no static peers.",
+                default: [],
+                items: {
+                  type: "string",
+                  pattern: "^[0-9a-fA-F]{32}$",
+                  minLength: 32,
+                  maxLength: 32,
+                },
+              },
+            },
+            additionalProperties: false,
+          },
+          rfed: {
+            type: "object",
+            title: "RFed federation node",
+            description:
+              "Embedded RFed federation node configuration. When enabled, " +
+              "the plugin runs its own rfed federation node that relays " +
+              "channel messages and provides store-and-forward for " +
+              "telemetry channels. This replaces the need for an external " +
+              "RFed node (the rfed.node setting is ignored when this is enabled).",
+            properties: {
+              enabled: {
+                type: "boolean",
+                title: "Run embedded RFed federation node",
+                description:
+                  "When enabled, the plugin runs its own RFed federation " +
+                  "node. The node relays channel messages and provides " +
+                  "store-and-forward for telemetry channels. On by default.",
+                default: true,
+              },
+              name: {
+                type: "string",
+                title: "Federation node name",
+                description:
+                  "Display name announced for this federation node. " +
+                  "Defaults to 'rfed'.",
+                default: "rfed",
+              },
+              stamp_cost: {
+                type: "number",
+                title: "Stamp cost (bits)",
+                description:
+                  "Proof-of-work leading-zero bits required for channel " +
+                  "messages. Set to 0 to disable. Defaults to 16 bits.",
+                default: 16,
+                minimum: 0,
+                maximum: 32,
+              },
+              stamp_flexibility: {
+                type: "number",
+                title: "Stamp flexibility (bits)",
+                description:
+                  "Downward cost tolerance for stamp validation. A message " +
+                  "with a stamp cost at least this many bits below the " +
+                  "required cost is accepted. Defaults to 3 bits.",
+                default: 3,
+                minimum: 0,
+                maximum: 32,
+              },
+              storage_limit_mb: {
+                type: "number",
+                title: "Storage limit (MB)",
+                description:
+                  "Maximum storage for channel blobs. Old blobs are evicted " +
+                  "when the limit is reached. Leave empty for unlimited.",
+                default: null,
+                minimum: 1,
+              },
+              blob_ttl_days: {
+                type: "number",
+                title: "Blob TTL (days)",
+                description:
+                  "Maximum age for stored blobs. Old blobs are pruned " +
+                  "regardless of storage limit. Defaults to 30 days.",
+                default: 30,
+                minimum: 1,
+              },
+              deferred_ttl_days: {
+                type: "number",
+                title: "Deferred delivery TTL (days)",
+                description:
+                  "Maximum age for entries in the deferred delivery queue. " +
+                  "Defaults to 7 days.",
+                default: 7,
+                minimum: 1,
+              },
+              maintenance_interval_seconds: {
+                type: "number",
+                title: "Maintenance interval (seconds)",
+                description:
+                  "How often to run maintenance (prune old messages/blobs, " +
+                  "persist stores to disk). Defaults to 3600 seconds (1 " +
+                  "hour).",
+                default: 3600,
+                minimum: 60,
+              },
+              backup_interval_seconds: {
+                type: "number",
+                title: "Backup tick interval (seconds)",
+                description:
+                  "How often to run backup failover checks (push deferred " +
+                  "messages to backup nodes, adopt from failed owners). " +
+                  "Defaults to 30 seconds.",
+                default: 30,
+                minimum: 10,
+              },
+              sync_peers: {
+                type: "array",
+                title: "Static federation peers",
+                description:
+                  "List of 32-character hexadecimal destination hashes of " +
+                  "other RFed federation nodes to sync with periodically. " +
+                  "Blobs are exchanged on sync. Leave empty for no static " +
+                  "peers.",
+                default: [],
+                items: {
+                  type: "string",
+                  pattern: "^[0-9a-fA-F]{32}$",
+                  minLength: 32,
+                  maxLength: 32,
+                },
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        additionalProperties: false,
+      },
     },
   };
 }

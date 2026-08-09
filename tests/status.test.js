@@ -92,6 +92,8 @@ test("formatStatusValues extracts interface info", () => {
     null,
     null,
     null,
+    null,
+    null,
     mockIdentity,
     "Test Node",
   );

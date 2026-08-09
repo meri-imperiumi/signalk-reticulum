@@ -490,6 +490,67 @@ function makeShipTelemetryPublisher(client, nodeHashHex, channel) {
 }
 
 /**
+ * Periodically pulls deferred messages from the RFed node for a channel.
+ * This fetches messages that were deferred (e.g., due to offline subscribers)
+ * so they're not lost. The pull continues until no more pending messages.
+ *
+ * @param {object} client - An `RFedClient`.
+ * @param {Uint8Array} nodeHash - The federation node's destination hash.
+ * @param {string} channel - The channel name to pull from.
+ * @param {(decoded:any)=>void} onMessage - Callback for each pulled message.
+ * @param {(...args:any[])=>void} [log]
+ */
+async function pullDeferredMessages(
+  client,
+  nodeHash,
+  channel,
+  onMessage,
+  log = () => {},
+) {
+  if (!client) return;
+
+  let totalPulled = 0;
+  try {
+    let morePending = true;
+    while (morePending) {
+      const result = await client.pull(nodeHash, channel);
+      for (const item of result.items) {
+        try {
+          // Decode the pulled blob the same way fanout messages are decoded
+          const channelEntry = client._channelByHash(item.channelHash);
+          if (!channelEntry) {
+            log(`Pulled message for unknown channel`);
+            continue;
+          }
+          const {
+            unwrapChannelMessage,
+          } = require("@reticulum/core/src/rfed/blob.js");
+          const decoded = await unwrapChannelMessage({
+            innerBlob: item.blob,
+            channelIdentity: channelEntry.identity,
+            channelDeliveryHash: channelEntry.deliveryHash,
+          });
+          onMessage({
+            ...decoded,
+            channelHash: item.channelHash,
+            channelName: channelEntry.name,
+          });
+          totalPulled++;
+        } catch (e) {
+          log(`Failed to decode pulled message: ${e.message}`);
+        }
+      }
+      morePending = result.morePending;
+    }
+    if (totalPulled > 0) {
+      log(`Pulled ${totalPulled} deferred message(s) from RFed node`);
+    }
+  } catch (e) {
+    log(`RFed pull failed: ${e.message}`);
+  }
+}
+
+/**
  * Brings up an RFed channel client against a federation node: starts listening
  * for live fanout deliveries on the node's own `rfed.delivery` destination and
  * subscribes to the channel (caching the advertised PoW stamp cost so later
@@ -575,5 +636,6 @@ module.exports = {
   buildShipTelemetryDelta,
   handleInboundShipTelemetry,
   makeShipTelemetryPublisher,
+  pullDeferredMessages,
   setupRFed,
 };

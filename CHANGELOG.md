@@ -1,4 +1,15 @@
 # Changelog
+## [Unreleased]
+
+### Added
+- **Embedded LXMF propagation node and RFed federation node**: The plugin can now run an LXMF propagation node and/or an RFed federation node directly inside the plugin process, sharing the Reticulum instance and identity with the rest of the plugin. This provides store-and-forward messaging and channel telemetry services to the mesh without requiring external nodes. Both are enabled by default. When an embedded node is running, the plugin uses it instead of looking for an external node. Configuration is available under the new `embedded_nodes` config group with options for:
+  - **LXMF propagation node**: enable/disable, display name, stamp cost, peering cost, auto-peering, storage limits, message TTL, and static peers
+  - **RFed federation node**: enable/disable, display name, stamp cost and flexibility, storage limits, blob/deferred TTL, maintenance and backup intervals, and static sync peers
+- Embedded nodes periodically sync from their own embedded instances: the plugin syncs messages from the embedded propagation node every 5 minutes, and pulls deferred RFed messages every 5 minutes. Maintenance and persistence run on configurable intervals (defaults: 1 hour for maintenance, 30 seconds for backup tick)
+- Reticulum status now includes embedded nodes information: `embeddedPropagationRunning`, `propagationStored`, `embeddedRfedRunning`, `rfedBlobsStored`, and `rfedSubscriptions` are published under `communication.reticulum.*`
+- RFed client now periodically pulls deferred messages from external nodes (every 5 minutes) to catch messages that weren't fanout-delivered while the plugin was offline. A new `pullDeferredMessages()` function handles the pull and continues until no more pending messages remain
+- Smoketests for embedded nodes functionality
+
 ## [0.3.1] - 2026-08-07
 ### Added
 - Reticulum status to Signal K: the plugin now publishes periodic mesh status information to Signal K under the `communication.reticulum.*` paths, similar to how `signalk-meshtastic` exposes node information. Published every 60 seconds and includes: `identityHash` (the node's unique 32-hex identifier), `displayName` (the announced name), `interfacesConnected` (count of online interfaces), `links` (number of active transport connections; ephemeral, non-zero only during active exchanges), `destinationsKnown` (number of remote destinations in the routing table), `bytesReceived`/`bytesTransmitted` (total traffic counters aggregated across all interfaces), and `interfaces` (array of interface objects with `name`, `type`, `online`, `bitrate` for each interface). Per-interface traffic statistics are also published under `communication.reticulum.interfaces.<name>.bytesReceived`/`bytesTransmitted`. Metadata (display names, descriptions, units) is published on startup for instrumentation

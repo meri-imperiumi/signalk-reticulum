@@ -41,7 +41,16 @@ function getInterfaceStats(iface) {
  * @param {string} [displayName] - Optional display name
  * @returns {{identityHash: string, displayName: string, interfaces: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number}}
  */
-function getStatus(rns, _lxmf, _nomadnet, _rfed, identity, displayName) {
+function getStatus(
+  rns,
+  _lxmf,
+  _nomadnet,
+  _rfed,
+  _embeddedPropagation,
+  _embeddedRfed,
+  identity,
+  displayName,
+) {
   const interfaces = [];
   let interfacesConnected = 0;
   let bytesReceived = 0;
@@ -74,6 +83,24 @@ function getStatus(rns, _lxmf, _nomadnet, _rfed, identity, displayName) {
     destinationsKnown = rns.transport.routingTable.routes.size;
   }
 
+  // Check embedded nodes
+  const embeddedPropagationRunning = !!_lxmf?.propagationNode;
+  const embeddedRfedRunning = !!_embeddedRfed;
+
+  // Get propagation node stats
+  let propagationStored = 0;
+  if (embeddedPropagationRunning && _lxmf.propagationNode?.store) {
+    propagationStored = _lxmf.propagationNode.store.size || 0;
+  }
+
+  // Get RFed node stats
+  let rfedBlobsStored = 0;
+  let rfedSubscriptions = 0;
+  if (embeddedRfedRunning && _embeddedRfed?.blobStore) {
+    rfedBlobsStored = _embeddedRfed.blobStore.allMessageIds().length || 0;
+    rfedSubscriptions = _embeddedRfed.subscriptions?.length || 0;
+  }
+
   return {
     identityHash: identity?.identityHash ? toHex(identity.identityHash) : "",
     displayName: displayName || "",
@@ -83,6 +110,11 @@ function getStatus(rns, _lxmf, _nomadnet, _rfed, identity, displayName) {
     interfacesConnected,
     bytesReceived,
     bytesTransmitted,
+    embeddedPropagationRunning,
+    propagationStored,
+    embeddedRfedRunning,
+    rfedBlobsStored,
+    rfedSubscriptions,
   };
 }
 
@@ -97,8 +129,26 @@ function getStatus(rns, _lxmf, _nomadnet, _rfed, identity, displayName) {
  * @param {string} [displayName] - Optional display name
  * @returns {{path: string, value: any}[]}
  */
-function formatStatusValues(rns, lxmf, nomadnet, rfed, identity, displayName) {
-  const status = getStatus(rns, lxmf, nomadnet, rfed, identity, displayName);
+function formatStatusValues(
+  rns,
+  lxmf,
+  nomadnet,
+  rfed,
+  embeddedPropagation,
+  embeddedRfed,
+  identity,
+  displayName,
+) {
+  const status = getStatus(
+    rns,
+    lxmf,
+    nomadnet,
+    rfed,
+    embeddedPropagation,
+    embeddedRfed,
+    identity,
+    displayName,
+  );
   const values = [
     {
       path: "communication.reticulum.identityHash",
@@ -154,6 +204,30 @@ function formatStatusValues(rns, lxmf, nomadnet, rfed, identity, displayName) {
       },
     );
   }
+
+  // Add embedded nodes status
+  values.push(
+    {
+      path: "communication.reticulum.embeddedPropagationRunning",
+      value: status.embeddedPropagationRunning,
+    },
+    {
+      path: "communication.reticulum.propagationStored",
+      value: status.propagationStored,
+    },
+    {
+      path: "communication.reticulum.embeddedRfedRunning",
+      value: status.embeddedRfedRunning,
+    },
+    {
+      path: "communication.reticulum.rfedBlobsStored",
+      value: status.rfedBlobsStored,
+    },
+    {
+      path: "communication.reticulum.rfedSubscriptions",
+      value: status.rfedSubscriptions,
+    },
+  );
 
   return values;
 }
@@ -229,6 +303,51 @@ function getStatusMetadata() {
         displayName: "Bytes transmitted",
         description: "Total bytes transmitted across all interfaces",
         units: "bytes",
+      },
+    },
+    {
+      path: "communication.reticulum.embeddedPropagationRunning",
+      value: {
+        displayName: "Embedded LXMF propagation node",
+        description:
+          "Whether the plugin is running an embedded LXMF propagation node",
+        type: "boolean",
+      },
+    },
+    {
+      path: "communication.reticulum.propagationStored",
+      value: {
+        displayName: "Propagation stored messages",
+        description:
+          "Number of messages stored in the embedded LXMF propagation node",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.embeddedRfedRunning",
+      value: {
+        displayName: "Embedded RFed federation node",
+        description:
+          "Whether the plugin is running an embedded RFed federation node",
+        type: "boolean",
+      },
+    },
+    {
+      path: "communication.reticulum.rfedBlobsStored",
+      value: {
+        displayName: "RFed stored blobs",
+        description:
+          "Number of blobs stored in the embedded RFed federation node",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.rfedSubscriptions",
+      value: {
+        displayName: "RFed channel subscriptions",
+        description:
+          "Number of channel subscriptions in the embedded RFed federation node",
+        units: "count",
       },
     },
   ];

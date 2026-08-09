@@ -417,6 +417,7 @@ test("schema exposes identity and interface groups with the AutoInterface defaul
     "telemetry",
     "rfed",
     "appearance",
+    "embedded_nodes",
   ]);
   const identity = schema.properties.identity;
   assert.ok("publicKey" in identity.properties);
