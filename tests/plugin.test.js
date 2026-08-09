@@ -374,6 +374,23 @@ test("the plugin module exports a constructor that returns a plugin object", () 
   assert.equal(typeof plugin.start, "function");
   assert.equal(typeof plugin.stop, "function");
   assert.equal(typeof plugin.schema, "function");
+  assert.equal(typeof plugin.uiSchema, "function");
+});
+
+test("uiSchema orders the essentials first and the log level last", () => {
+  const plugin = makePlugin(makeApp());
+  const ui = plugin.uiSchema();
+  const order = ui["ui:order"];
+
+  assert.deepEqual(order.slice(0, 4), [
+    "use_shared_instance",
+    "messaging",
+    "crew",
+    "identity",
+  ]);
+  assert.equal(order[order.length - 1], "log_level");
+  // The derived public key is hidden (users manage the private key only).
+  assert.deepEqual(ui.identity, { publicKey: { "ui:widget": "hidden" } });
 });
 
 test("schema exposes one instance array per configurable registry type", () => {

@@ -16,7 +16,11 @@ const {
   listInterfaces,
   LocalClientInterface,
 } = require("@reticulum/node");
-const { buildPluginSchema, EXCLUDED_INTERFACE_IDS } = require("./schema");
+const {
+  buildPluginSchema,
+  buildPluginUiSchema,
+  EXCLUDED_INTERFACE_IDS,
+} = require("./schema");
 const { resolveIdentity } = require("./identity");
 const { effectiveInterfaces, setupInterfaces, interfacesFromConfig } =
   require("./interfaces");
@@ -1597,6 +1601,7 @@ module.exports = (app) => {
     },
 
     schema: () => buildPluginSchema(listInterfaces()),
+    uiSchema: () => buildPluginUiSchema(listInterfaces()),
   };
   return plugin;
 };

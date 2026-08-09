@@ -855,10 +855,96 @@ function buildPluginSchema(interfaces) {
   };
 }
 
+/**
+ * Feature groups whose options are rarely needed day-to-day. In the admin UI
+ * they are ordered after the essentials so the common settings surface first.
+ *
+ * Note: the Signal K docs describe making a group `collapsible` via
+ * `ui:field: "collapsible"` from `react-jsonschema-form-extras`. That does NOT
+ * work in current Signal K server builds (verified against server 2.29.0):
+ * the admin UI migrated to `@rjsf/core` v5 and bundles neither
+ * `react-jsonschema-form-extras` nor any theme that registers a `collapsible`
+ * field, so the entry is silently ignored. RJSF v5 has no built-in collapsible
+ * field, and a plugin can only reference fields the admin UI already
+ * registers — so true collapse is not achievable from a plugin's uiSchema. We
+ * therefore rely on the native RJSF v5 levers that DO work — `ui:order`
+ * (reorder) and `ui:widget: "hidden"` (hide) — to cut visual noise.
+ */
+const ADVANCED_GROUPS = [
+  "announce",
+  "propagation",
+  "nomadnet",
+  "telemetry",
+  "rfed",
+  "appearance",
+  "embedded_nodes",
+];
+
+/**
+ * Builds the plugin configuration uiSchema.
+ *
+ * The JSON Schema's top-level shape is left untouched (so existing saved
+ * configs and every config reader keep working); the uiSchema only controls
+ * how the Signal K admin UI lays the fields out, using the RJSF v5 features
+ * the admin UI actually supports (see {@link ADVANCED_GROUPS} for why
+ * `collapsible` is not used):
+ *
+ *  - `ui:order` surfaces the essentials first — the shared-instance switch,
+ *    the crew-alerting setup (`messaging`, `crew`) and `identity` — then the
+ *    advanced feature groups, then the mesh interface arrays, and finally the
+ *    log level. The nine interface arrays are only relevant when
+ *    `use_shared_instance` is off (the default is on), so they are pushed to
+ *    the end instead of dominating the top of the form.
+ *  - `ui:widget: "hidden"` hides the derived, read-only `identity.publicKey`
+ *    (it is computed from the private key, and the node's identity hash is
+ *    already published under `communication.reticulum.identityHash`), keeping
+ *    the Identity group focused on the one field users actually manage.
+ *
+ * @param {InterfaceRegistryEntry[]} interfaces
+ * @returns {Record<string, any>}
+ */
+function buildPluginUiSchema(interfaces) {
+  const uiSchema = {
+    // Essentials first: the shared-instance switch and the crew-alerting setup
+    // are what almost every user configures. Identity follows (paste a
+    // private key once, or leave it to auto-generate).
+    "ui:order": ["use_shared_instance", "messaging", "crew", "identity"],
+  };
+
+  // Advanced feature groups, in declared order.
+  for (const key of ADVANCED_GROUPS) {
+    uiSchema["ui:order"].push(key);
+  }
+
+  // Mesh interface arrays — only relevant when `use_shared_instance` is off
+  // (the default is on), so they go last (before the log level) instead of
+  // dominating the top of the form.
+  for (const entry of interfaces) {
+    if (EXCLUDED_INTERFACE_IDS.includes(entry.id)) {
+      continue;
+    }
+    uiSchema["ui:order"].push(configKeyFor(entry.id));
+  }
+
+  // Log level is a troubleshooting knob — dead last.
+  uiSchema["ui:order"].push("log_level");
+
+  // Hide the derived public key; users manage the private key only (the
+  // node's identity hash is already published under
+  // communication.reticulum.identityHash).
+  uiSchema.identity = {
+    publicKey: { "ui:widget": "hidden" },
+  };
+
+  return uiSchema;
+}
+
 module.exports = {
   EXCLUDED_INTERFACE_IDS,
   configKeyFor,
   buildInterfaceArray,
   buildInterfaceArrays,
   buildPluginSchema,
+  buildPluginUiSchema,
+  ADVANCED_GROUPS,
 };

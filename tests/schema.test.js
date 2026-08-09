@@ -3,10 +3,12 @@ const assert = require("node:assert/strict");
 
 const {
   buildPluginSchema,
+  buildPluginUiSchema,
   buildInterfaceArray,
   buildInterfaceArrays,
   configKeyFor,
   EXCLUDED_INTERFACE_IDS,
+  ADVANCED_GROUPS,
 } = require("../plugin/schema");
 
 /**
@@ -226,4 +228,111 @@ test("buildPluginSchema crew items support both identity and destination", () =>
 
   // Destination is marked as legacy
   assert(destination.title.includes("legacy"));
+});
+
+/**
+ * Builds an interface registry entry shaped like a real one, for uiSchema
+ * tests.
+ *
+ * @param {Partial<{id:string,name:string,schema:object}>} [overrides]
+ * @returns {{id:string,name:string,schema:object}}
+ */
+function makeUiEntry(overrides = {}) {
+  return {
+    id: "fake",
+    name: "Fake Interface",
+    schema: { properties: { host: { type: "string" } }, required: ["host"] },
+    ...overrides,
+  };
+}
+
+/**
+ * The expected uiSchema fragment for hiding a field via the built-in RJSF
+ * `hidden` widget (which the Signal K admin UI supports natively, unlike the
+ * `collapsible` field from react-jsonschema-form-extras).
+ */
+const HIDDEN = { "ui:widget": "hidden" };
+
+test("buildPluginUiSchema surfaces the essentials first and the log level last", () => {
+  const entries = [
+    makeUiEntry({ id: "auto", name: "AutoInterface" }),
+    makeUiEntry({ id: "tcp-client", name: "TCP Client Interface" }),
+    makeUiEntry({ id: "webrtc", name: "WebRTC Interface" }),
+  ];
+  const ui = buildPluginUiSchema(entries);
+  const order = ui["ui:order"];
+
+  // The shared-instance switch and the crew-alerting setup lead, so a casual
+  // user sees the basics before the advanced groups and the interface arrays.
+  assert.deepEqual(order.slice(0, 4), [
+    "use_shared_instance",
+    "messaging",
+    "crew",
+    "identity",
+  ]);
+  // The log level — a troubleshooting knob — is always dead last.
+  assert.equal(order[order.length - 1], "log_level");
+});
+
+test("buildPluginUiSchema pushes the interface arrays to the end, before the log level", () => {
+  const entries = [
+    makeUiEntry({ id: "tcp-client", name: "TCP Client Interface" }),
+    makeUiEntry({ id: "auto", name: "AutoInterface" }),
+    makeUiEntry({ id: "webrtc", name: "WebRTC Interface" }),
+  ];
+  const ui = buildPluginUiSchema(entries);
+  const order = ui["ui:order"];
+
+  // Advanced feature groups land right after the essentials, in declared order.
+  const identityIndex = order.indexOf("identity");
+  assert.deepEqual(
+    order.slice(identityIndex + 1, identityIndex + 1 + ADVANCED_GROUPS.length),
+    ADVANCED_GROUPS,
+  );
+
+  // The interface arrays come after every advanced group and before log_level.
+  // WebRTC is excluded so it never appears.
+  const lastAdvanced = order.indexOf(
+    ADVANCED_GROUPS[ADVANCED_GROUPS.length - 1],
+  );
+  const logIndex = order.indexOf("log_level");
+  assert.deepEqual(order.slice(lastAdvanced + 1, logIndex), [
+    "tcp_clients",
+    "auto_interfaces",
+  ]);
+  assert.ok(!("webrtc_interfaces" in order), "WebRTC is not in the uiSchema");
+});
+
+test("buildPluginUiSchema hides the derived identity.publicKey but not the privateKey", () => {
+  const ui = buildPluginUiSchema([]);
+
+  // publicKey is readOnly and derived from privateKey, so it is hidden to keep
+  // the Identity group focused on the one field users manage.
+  assert.deepEqual(ui.identity, { publicKey: HIDDEN });
+});
+
+test("buildPluginUiSchema leaves the essentials (messaging, crew, log_level) without a uiSchema entry", () => {
+  const ui = buildPluginUiSchema([]);
+  // These are intentionally left without a uiSchema entry so the primary
+  // fields render with their defaults.
+  assert.equal(ui.messaging, undefined);
+  assert.equal(ui.crew, undefined);
+  assert.equal(ui.log_level, undefined);
+  assert.equal(ui.use_shared_instance, undefined);
+});
+
+test("buildPluginUiSchema covers exactly every schema top-level property", () => {
+  const entries = [
+    makeUiEntry({ id: "auto", name: "AutoInterface" }),
+    makeUiEntry({ id: "tcp-client", name: "TCP Client Interface" }),
+    makeUiEntry({ id: "webrtc", name: "WebRTC Interface" }),
+  ];
+  const schema = buildPluginSchema(entries);
+  const ui = buildPluginUiSchema(entries);
+
+  // Every schema property is accounted for in ui:order, with no extras.
+  assert.deepEqual(
+    ui["ui:order"].sort(),
+    Object.keys(schema.properties).sort(),
+  );
 });

@@ -1,4 +1,12 @@
 # Changelog
+## [Unreleased]
+### Changed
+- The plugin now ships a `uiSchema` so the Signal K admin UI lays the configuration out with less visual noise. The JSON Schema's top-level shape is unchanged (existing saved configs and every config reader keep working); only presentation is affected, using the RJSF v5 features the admin UI actually supports:
+  - `ui:order` surfaces the essentials first — the shared-instance switch, the crew-alerting setup (`messaging`, `crew`) and `identity` — then the advanced feature groups (`announce`, `propagation`, `nomadnet`, `telemetry`, `rfed`, `appearance`, `embedded_nodes`), then the mesh interface arrays, and finally the log level. The nine interface arrays are only relevant when `use_shared_instance` is off (the default is on), so they are pushed to the end instead of dominating the top of the form.
+  - `ui:widget: "hidden"` hides the derived, read-only `identity.publicKey` (it is computed from the private key, and the node's identity hash is already published under `communication.reticulum.identityHash`), keeping the Identity group focused on the one field users actually manage.
+  - Note: the Signal K docs describe making groups `collapsible` via `ui:field: "collapsible"` from `react-jsonschema-form-extras`, but that does **not** work in current Signal K server builds (verified against server 2.29.0): the admin UI migrated to `@rjsf/core` v5 and bundles neither `react-jsonschema-form-extras` nor a theme that registers a `collapsible` field, so the entry is silently ignored. We therefore rely on `ui:order` and `ui:widget: "hidden"` instead.
+  - Smoketests for the uiSchema builder and the plugin's `uiSchema()` export.
+
 ## [0.4.0] - 2026-08-08
 
 ### Added
