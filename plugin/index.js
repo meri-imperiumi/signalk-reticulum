@@ -59,8 +59,10 @@ const {
   effectiveChannel,
   encodeShipTelemetry,
   makeShipTelemetryPublisher,
+  makeEmbeddedShipTelemetryPublisher,
   pullDeferredMessages,
   setupRFed,
+  setupEmbeddedRFedClient,
   handleInboundShipTelemetry,
 } = require("./rfed");
 const {
@@ -842,24 +844,24 @@ module.exports = (app) => {
               unsubscribes.push(embeddedRfed.teardown);
               app.debug("Embedded RFed federation node started");
 
-              // When RFed receive telemetry is enabled, set up an RFedClient
-              // to subscribe to the embedded node and receive fanout
-              const rfedReceive =
-                config && config.rfed && config.rfed.receive_telemetry;
-              if (rfedReceive) {
+              const rfedConfig = config.rfed || {};
+              const rfedReceive = !!rfedConfig.receive_telemetry;
+              const rfedTransmit = !!rfedConfig.transmit_telemetry;
+
+              // The embedded node and its "client" share one Reticulum
+              // instance and identity, so the link-based RFedClient used for a
+              // *remote* node can't reach the local destination (a local
+              // announce is never ingested, so the node's identity is never
+              // recallable, and an outbound packet to a local destination has
+              // no path). Wire the local client directly to the node instead:
+              // receive taps the node's fanout; transmit ingests directly.
+              // The node remains a fully normal federation node to everything
+              // on the mesh — remote boats subscribe and publish via links
+              // exactly as they would to any rfed node.
+              if (rfedReceive || rfedTransmit) {
                 const selfIdentityHashHex = toHex(plugin.identity.identityHash);
                 const selfMmsi = readString(readSelf(app, "mmsi"));
-                const rfedChannel = effectiveChannel(
-                  config && config.rfed ? config.rfed.channel : undefined,
-                );
-
-                // Set up an RFedClient that will subscribe to the embedded node
-                const { RFedClient } = require("@reticulum/core/src/rfed");
-                const rfedClient = new RFedClient({
-                  identity: plugin.identity,
-                  rns,
-                });
-                plugin.rfed = rfedClient;
+                const rfedChannel = effectiveChannel(rfedConfig.channel);
 
                 const onRFedMessage = (decoded) => {
                   handleInboundShipTelemetry(
@@ -871,72 +873,37 @@ module.exports = (app) => {
                   );
                 };
 
-                // The embedded node shares our identity, so its destinations
-                // are derived from the same identity. We can derive the
-                // node's channel.subscribe hash to use as the nodeHash.
-                const { deriveChannel, deliveryHashFor } =
-                  require("@reticulum/core/src/rfed/channel.js");
-                let nodeHash = null;
-                let channelHash = null;
-
-                // Start listening for fanout and subscribe to the channel
-                const setupClient = async () => {
+                // Receive: tap the node's fanout in-process. Every blob the
+                // node ingests (live remote publish, peer sync, or our own
+                // transmit) is decoded and handed to the telemetry handler;
+                // the node's own echo is dropped by the self-identity guard.
+                if (rfedReceive) {
                   try {
-                    const channelDerivation = await deriveChannel(rfedChannel);
-                    channelHash = channelDerivation.channelHash;
-                    nodeHash = await deliveryHashFor(
-                      channelDerivation.identity,
-                    );
-
-                    await rfedClient.listen(onRFedMessage);
-                    app.debug(
-                      `RFed client listening for fanout on channel "${rfedChannel}"`,
-                    );
-
-                    await rfedClient.subscribe(nodeHash, rfedChannel);
-                    app.debug(
-                      `RFed client subscribed to channel "${rfedChannel}" via embedded node`,
-                    );
-                  } catch (e) {
-                    app.debug(`RFed client setup error: ${e.message}`);
-                  }
-                };
-
-                // Start after a short delay to ensure the embedded node is ready
-                const setupDelay = setTimeout(setupClient, 3000);
-                unsubscribes.push(() => clearTimeout(setupDelay));
-
-                // Periodically pull deferred messages from the embedded node
-                const pullOnce = async () => {
-                  if (!nodeHash || !channelHash) return;
-                  try {
-                    await pullDeferredMessages(
-                      rfedClient,
-                      nodeHash,
+                    const rfedClient = await setupEmbeddedRFedClient(
+                      embeddedRfed.node,
                       rfedChannel,
                       onRFedMessage,
                       app.debug,
                     );
+                    unsubscribes.push(rfedClient.teardown);
+                    app.debug(
+                      `RFed client tapped embedded node on channel "${rfedChannel}"`,
+                    );
                   } catch (e) {
-                    app.debug(`Embedded RFed pull error: ${e.message}`);
+                    app.debug(`Embedded RFed client setup error: ${e.message}`);
                   }
-                };
-                const initialPull = setTimeout(pullOnce, 15000);
-                const pullTimer = setInterval(pullOnce, 5 * 60 * 1000);
-                unsubscribes.push(() => {
-                  clearTimeout(initialPull);
-                  clearInterval(pullTimer);
-                });
+                }
 
-                // Also enable transmit if configured
-                const rfedTransmit = !!config.rfed.transmit_telemetry;
-                if (rfedTransmit && nodeHash) {
-                  const publishShip = makeShipTelemetryPublisher(
-                    rfedClient,
-                    toHex(nodeHash),
+                // Transmit: publish own telemetry by ingesting directly into
+                // the embedded node, which stores the blob (surfaced as
+                // rfedBlobsStored) and fans it out to remote subscribers.
+                if (rfedTransmit) {
+                  const publishShip = makeEmbeddedShipTelemetryPublisher(
+                    embeddedRfed.node,
+                    plugin.identity,
                     rfedChannel,
                   );
-                  const rawInterval = Number(config.rfed.interval_seconds);
+                  const rawInterval = Number(rfedConfig.interval_seconds);
                   const rfedIntervalSec =
                     Number.isFinite(rawInterval) && rawInterval > 0
                       ? Math.max(30, rawInterval)
@@ -956,23 +923,15 @@ module.exports = (app) => {
                       app.debug(`RFed snapshot error: ${e.message}`);
                     }
                   };
-                  // Wait for nodeHash to be set
-                  const startTransmit = () => {
-                    if (nodeHash) {
-                      const initial = setTimeout(sendShipOnce, 5000);
-                      const timer = setInterval(
-                        sendShipOnce,
-                        rfedIntervalSec * 1000,
-                      );
-                      unsubscribes.push(() => {
-                        clearTimeout(initial);
-                        clearInterval(timer);
-                      });
-                    } else {
-                      setTimeout(startTransmit, 1000);
-                    }
-                  };
-                  setTimeout(startTransmit, 4000);
+                  const initial = setTimeout(sendShipOnce, 5000);
+                  const timer = setInterval(
+                    sendShipOnce,
+                    rfedIntervalSec * 1000,
+                  );
+                  unsubscribes.push(() => {
+                    clearTimeout(initial);
+                    clearInterval(timer);
+                  });
                 }
               }
             }

@@ -143,8 +143,7 @@ async function getStatus(
       if (_lxmf.propagationDest.destinationHash) {
         propagationNodeHash = toHex(_lxmf.propagationDest.destinationHash);
       }
-    } catch (e) {
-    }
+    } catch (e) {}
   }
 
   // Get RFed node stats and destination hash
@@ -156,16 +155,14 @@ async function getStatus(
       ? _embeddedRfed.blobStore.allMessageIds().length || 0
       : 0;
     rfedSubscriptions = _embeddedRfed?.subscriptions?.length || 0;
-    // Derive the RFed node's destination hash from its identity
-    // For the node's own destination, use the node identity directly
+    // The RFed node's destination hash is its own `rfed.node` aspect hash
+    // (the canonical node identifier remote clients use), not the LXMF
+    // delivery hash of its identity.
     try {
-      const {
-        deliveryHashFor,
-      } = require("@reticulum/core/src/rfed/channel.js");
-      const hashArray = await deliveryHashFor(_embeddedRfed.identity);
-      rfedNodeHash = toHex(hashArray);
+      rfedNodeHash = _embeddedRfed?.nodeHash
+        ? toHex(_embeddedRfed.nodeHash)
+        : null;
     } catch (e) {
-      // If we can't derive the hash, it's null
       rfedNodeHash = null;
     }
   }

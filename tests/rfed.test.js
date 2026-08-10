@@ -1,7 +1,14 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { Identity, toHex, fromHex } = require("@reticulum/core");
+const { Reticulum, Identity, toHex, fromHex } = require("@reticulum/core");
+const {
+  RFedNode,
+  BlobStore,
+  SubscriptionTable,
+  DeferredQueue,
+  NotifyRegistry,
+} = require("@reticulum/core/src/rfed/index.js");
 const rfed = require("../plugin/rfed");
 const {
   SCHEMA_VERSION,
@@ -13,9 +20,14 @@ const {
   buildShipTelemetryDelta,
   handleInboundShipTelemetry,
   makeShipTelemetryPublisher,
+  makeEmbeddedShipTelemetryPublisher,
   setupRFed,
+  setupEmbeddedRFedClient,
 } = rfed;
-const { FIELD_TELEMETRY } = require("../plugin/telemetry");
+const {
+  FIELD_TELEMETRY,
+  extractTelemetryField,
+} = require("../plugin/telemetry");
 
 /** A representative full readings object used across many tests. */
 function fullReadings() {
@@ -545,5 +557,210 @@ test("setupRFed keeps coming up when listen/subscribe fail (best-effort)", async
     setup.teardown();
   } finally {
     rfed.deps.RFedClient = realClient;
+  }
+});
+
+// --- embedded RFed node (real in-process RFedNode) -------------------------
+//
+// The embedded node and its "client" share one Reticulum instance and
+// identity, so the link-based RFedClient used for a *remote* node can't reach
+// the local destination. These smoketests exercise the in-process wiring
+// (transmit via direct ingest, receive via a fanout tap) against a REAL
+// RFedNode + Reticulum — no fakes — to prove the embedded node behaves like a
+// normal federation node: blobs are stored and (when there are subscribers)
+// would fan out over the mesh, and inbound blobs reach the telemetry handler.
+
+/** Builds a real in-process RFedNode (stamp-cost disabled) for smoketesting. */
+async function makeEmbeddedNode() {
+  const rns = new Reticulum({ requireDestinationProof: false });
+  const identity = await Identity.generate();
+  const node = new RFedNode({
+    identity,
+    rns,
+    stores: {
+      blobStore: new BlobStore(),
+      subscriptions: new SubscriptionTable(),
+      deferred: new DeferredQueue(),
+      notify: new NotifyRegistry(),
+    },
+    // No PoW stamp required so smoketests can publish without mining a stamp.
+    config: { name: "rfed", stampCost: 0, stampFlexibility: 0 },
+  });
+  await node.start();
+  return { rns, identity, node };
+}
+
+/** Wraps a packed snapshot as a SEND payload from `senderIdentity` on `channel`. */
+async function wrapRemoteSendPayload(channel, senderIdentity, packed) {
+  const {
+    deriveChannel,
+    deliveryHashFor,
+  } = require("@reticulum/core/src/rfed/channel.js");
+  const { wrapChannelMessage } = require("@reticulum/core/src/rfed/blob.js");
+  const { identity: channelIdentity } = await deriveChannel(channel);
+  const senderLxmDeliveryHash = await deliveryHashFor(senderIdentity);
+  const message = new rfed.deps.LXMessage({
+    sourceHash: new Uint8Array(16),
+    destinationHash: new Uint8Array(16),
+    title: "",
+    content: "",
+    fields: new Map([[FIELD_TELEMETRY, packed]]),
+  });
+  const { rfedPayload } = await wrapChannelMessage({
+    channelIdentity,
+    senderIdentity,
+    senderLxmDeliveryHash,
+    lxmMessage: message,
+    stampCost: null,
+  });
+  return rfedPayload;
+}
+
+test("makeEmbeddedShipTelemetryPublisher stores the blob in the embedded node", async () => {
+  const { rns, identity, node } = await makeEmbeddedNode();
+  try {
+    const publish = makeEmbeddedShipTelemetryPublisher(
+      node,
+      identity,
+      DEFAULT_CHANNEL,
+    );
+    assert.equal(node.blobStore.allMessageIds().length, 0);
+    await publish(encodeShipTelemetry(fullReadings()));
+    // Direct ingest stores the blob — surfaced as `rfedBlobsStored` in status.
+    assert.equal(node.blobStore.allMessageIds().length, 1);
+    // A no-op publish (nothing to send) does not store a second blob.
+    await publish(null);
+    assert.equal(node.blobStore.allMessageIds().length, 1);
+  } finally {
+    await node.stop();
+    await rns.stop();
+  }
+});
+
+test("setupEmbeddedRFedClient decodes blobs the node ingests (simulated remote publish)", async () => {
+  const { rns, identity, node } = await makeEmbeddedNode();
+  try {
+    const received = [];
+    const client = await setupEmbeddedRFedClient(
+      node,
+      DEFAULT_CHANNEL,
+      (decoded) => received.push(decoded),
+      () => {},
+    );
+    // Simulate a remote boat's SEND payload arriving at the publish dest.
+    const remote = await Identity.generate();
+    const packed = encodeShipTelemetry(fullReadings());
+    const payload = await wrapRemoteSendPayload(
+      DEFAULT_CHANNEL,
+      remote,
+      packed,
+    );
+    await node._handleSend(payload);
+
+    assert.equal(received.length, 1);
+    const decoded = received[0];
+    assert.equal(decoded.signatureValid, true);
+    assert.equal(
+      toHex(decoded.senderIdentity.identityHash),
+      toHex(remote.identityHash),
+    );
+    assert.equal(decoded.channelName, DEFAULT_CHANNEL);
+    // The telemetry round-trips through the canonical codec.
+    const doc = decodeShipTelemetry(
+      extractTelemetryField(decoded.message.fields),
+    );
+    assert.equal(doc.vessel.name, "Meri Imperiumi");
+    assert.equal(doc.vessel.mmsi, "230001234");
+    client.teardown();
+  } finally {
+    await node.stop();
+    await rns.stop();
+  }
+});
+
+test("setupEmbeddedRFedClient delivers the node's own echo (self-identity guard is one layer up)", async () => {
+  const { rns, identity, node } = await makeEmbeddedNode();
+  try {
+    const received = [];
+    const client = await setupEmbeddedRFedClient(
+      node,
+      DEFAULT_CHANNEL,
+      (decoded) => received.push(decoded),
+      () => {},
+    );
+    const publish = makeEmbeddedShipTelemetryPublisher(
+      node,
+      identity,
+      DEFAULT_CHANNEL,
+    );
+    await publish(encodeShipTelemetry(fullReadings()));
+    // The node's own publish is fanned out and decoded; the self-echo drop
+    // happens in `handleInboundShipTelemetry` (covered by its own tests), not
+    // at this layer — matching how the remote path handles its own echo.
+    assert.equal(received.length, 1);
+    assert.equal(
+      toHex(received[0].senderIdentity.identityHash),
+      toHex(identity.identityHash),
+    );
+    client.teardown();
+  } finally {
+    await node.stop();
+    await rns.stop();
+  }
+});
+
+test("setupEmbeddedRFedClient teardown restores the original fanout (no more delivery)", async () => {
+  const { rns, identity, node } = await makeEmbeddedNode();
+  try {
+    const received = [];
+    const client = await setupEmbeddedRFedClient(
+      node,
+      DEFAULT_CHANNEL,
+      (decoded) => received.push(decoded),
+      () => {},
+    );
+    client.teardown();
+    const remote = await Identity.generate();
+    const payload = await wrapRemoteSendPayload(
+      DEFAULT_CHANNEL,
+      remote,
+      encodeShipTelemetry(fullReadings()),
+    );
+    await node._handleSend(payload);
+    assert.equal(received.length, 0);
+    // The blob is still stored (ingest is independent of the receive tap).
+    assert.equal(node.blobStore.allMessageIds().length, 1);
+  } finally {
+    await node.stop();
+    await rns.stop();
+  }
+});
+
+test("setupEmbeddedRFedClient ignores blobs for a different channel", async () => {
+  const { rns, identity, node } = await makeEmbeddedNode();
+  try {
+    const received = [];
+    const client = await setupEmbeddedRFedClient(
+      node,
+      "public.signalk.vessels",
+      (decoded) => received.push(decoded),
+      (m) => {
+        throw new Error(`unexpected debug: ${m}`);
+      },
+    );
+    // Publish on a different channel; the tap must skip it without throwing.
+    const other = "private.fleet.alpha";
+    const remote = await Identity.generate();
+    const payload = await wrapRemoteSendPayload(
+      other,
+      remote,
+      encodeShipTelemetry(fullReadings()),
+    );
+    await node._handleSend(payload);
+    assert.equal(received.length, 0);
+    client.teardown();
+  } finally {
+    await node.stop();
+    await rns.stop();
   }
 });

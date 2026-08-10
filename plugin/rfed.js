@@ -624,6 +624,143 @@ async function setupRFed(rns, identity, options, onMessage, log) {
   };
 }
 
+/**
+ * Builds an async `publish(packedSnapshot)` that publishes own telemetry to the
+ * channel by ingesting directly into the embedded RFed node (in-process).
+ *
+ * When the plugin runs its own RFed federation node, the node and its client
+ * share one Reticulum instance and identity. A link-based `RFedClient` cannot
+ * reach a destination in the same process — a local announce is never
+ * ingested (so the node's identity is never recallable) and an outbound
+ * packet to a local destination has no path — so the local transmitter feeds
+ * the node's ingest directly instead.
+ *
+ * The snapshot is wrapped with the canonical `wrapChannelMessage` codec
+ * (EC-encrypted to the channel identity, RTID-preluded, LXMF-signed) —
+ * identical bytes to what a remote `RFedClient.publish` puts on the wire — then
+ * handed to `node._ingest`, which stores the blob (so it shows up in
+ * `rfedBlobsStored`) and fans it out to *remote* subscribers over the mesh.
+ * The embedded node therefore looks and behaves like a regular federation
+ * node to everything outside. The local publish skips PoW stamp validation
+ * (the operator trusts their own node); remote publishers still must stamp.
+ *
+ * @param {object} node - An `RFedNode` (the embedded federation node).
+ * @param {object} senderIdentity - This node's Reticulum identity (signs + EC).
+ * @param {string} channel - The channel name to publish on.
+ * @returns {(packedTelemetry:Uint8Array)=>Promise<void>}
+ */
+function makeEmbeddedShipTelemetryPublisher(node, senderIdentity, channel) {
+  return async function publishShipTelemetry(packedTelemetry) {
+    if (!node || !packedTelemetry) {
+      return;
+    }
+    const {
+      deriveChannel,
+      deliveryHashFor,
+    } = require("@reticulum/core/src/rfed/channel.js");
+    const { wrapChannelMessage } = require("@reticulum/core/src/rfed/blob.js");
+    const { identity: channelIdentity, channelHash } =
+      await deriveChannel(channel);
+    const senderLxmDeliveryHash = await deliveryHashFor(senderIdentity);
+    const message = new deps.LXMessage({
+      // Overwritten by RFed's wrapChannelMessage before signing.
+      sourceHash: new Uint8Array(DESTINATION_HASH_BYTES),
+      destinationHash: new Uint8Array(DESTINATION_HASH_BYTES),
+      title: "",
+      content: "",
+      fields: new Map([[FIELD_TELEMETRY, packedTelemetry]]),
+    });
+    const { innerBlob } = await wrapChannelMessage({
+      channelIdentity,
+      senderIdentity,
+      senderLxmDeliveryHash,
+      lxmMessage: message,
+      // The local publish is trusted (the operator owns this node); a stamp
+      // is never validated on the direct-ingest path, so none is generated.
+      stampCost: null,
+    });
+    await node._ingest(channelHash, innerBlob);
+  };
+}
+
+/**
+ * Wires an in-process RFed client to the embedded federation node so received
+ * channel messages reach the telemetry handler without a link.
+ *
+ * Taps the node's fanout: every blob the node ingests — whether published live
+ * by a remote boat over the mesh, pulled in by peer sync, or originated by
+ * this node's own transmitter — is decoded with the canonical
+ * `unwrapChannelMessage` codec and passed to `onMessage` with the same shape a
+ * link-based `RFedClient` produces. Only the configured channel is decoded
+ * (blobs for other channels are skipped); the node's own published echo is
+ * dropped by the existing self-identity guard in
+ * {@link handleInboundShipTelemetry} (the next layer up), matching how the
+ * remote path handles its own echo.
+ *
+ * This is the receive-side counterpart to {@link makeEmbeddedShipTelemetryPublisher}
+ * and exists because a link-based `RFedClient` cannot reach a destination in
+ * the same Reticulum process (see {@link makeEmbeddedShipTelemetryPublisher}'s
+ * rationale). The embedded node stays a normal federation node to everything
+ * outside: remote boats subscribe and publish via links exactly as they would
+ * to any rfed node.
+ *
+ * @param {object} node - An `RFedNode` (the embedded federation node).
+ * @param {string} channel - The channel name to decode.
+ * @param {(decoded:any)=>void} onMessage - Callback for each decoded message.
+ * @param {(...args:any[])=>void} [log]
+ * @returns {Promise<{teardown:()=>void}>}
+ */
+async function setupEmbeddedRFedClient(node, channel, onMessage, log) {
+  const debug = typeof log === "function" ? log : () => {};
+  if (!node) {
+    return { teardown: () => {} };
+  }
+  const {
+    deriveChannel,
+    deliveryHashFor,
+  } = require("@reticulum/core/src/rfed/channel.js");
+  const { unwrapChannelMessage } = require("@reticulum/core/src/rfed/blob.js");
+  const { identity: channelIdentity, channelHash: expectedChannelHash } =
+    await deriveChannel(channel);
+  const channelDeliveryHash = await deliveryHashFor(channelIdentity);
+  const expectedChannelHex = deps.toHex(expectedChannelHash);
+
+  const originalFanout = node._fanout.bind(node);
+  node._fanout = async (channelHash, innerBlob) => {
+    await originalFanout(channelHash, innerBlob);
+    // Decode and dispatch to the telemetry handler. The node's own echo is
+    // dropped downstream by the self-identity guard; a malformed/foreign
+    // blob is logged and never throws.
+    try {
+      if (!channelHash || channelHash.length !== DESTINATION_HASH_BYTES) {
+        return;
+      }
+      if (deps.toHex(channelHash) !== expectedChannelHex) {
+        return;
+      }
+      const decoded = await unwrapChannelMessage({
+        innerBlob,
+        channelIdentity,
+        channelDeliveryHash,
+      });
+      onMessage({
+        ...decoded,
+        channelHash: new Uint8Array(channelHash),
+        channelName: channel,
+      });
+    } catch (e) {
+      debug(`Embedded RFed receive decode error: ${e.message}`);
+    }
+  };
+
+  return {
+    teardown: () => {
+      // Remove the own property so the prototype method is used again.
+      delete node._fanout;
+    },
+  };
+}
+
 module.exports = {
   deps,
   SCHEMA_VERSION,
@@ -636,6 +773,8 @@ module.exports = {
   buildShipTelemetryDelta,
   handleInboundShipTelemetry,
   makeShipTelemetryPublisher,
+  makeEmbeddedShipTelemetryPublisher,
   pullDeferredMessages,
   setupRFed,
+  setupEmbeddedRFedClient,
 };
