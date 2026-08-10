@@ -233,7 +233,7 @@ test("getInterfaceStats derives a sanitized id alongside the name", () => {
   assert.equal(stats.type, "TCPClient");
 });
 
-test("per-interface paths use sanitized ids and never contain whitespace", () => {
+test("per-interface paths use sanitized ids and never contain whitespace", async () => {
   const mockRns = {
     transport: {
       interfaces: new Set([
@@ -251,7 +251,7 @@ test("per-interface paths use sanitized ids and never contain whitespace", () =>
     },
   };
 
-  const values = formatStatusValues(
+  const values = await formatStatusValues(
     mockRns,
     null,
     null,
@@ -289,7 +289,7 @@ test("per-interface paths use sanitized ids and never contain whitespace", () =>
   );
 });
 
-test("per-interface ids are unique when names collide after sanitization", () => {
+test("per-interface ids are unique when names collide after sanitization", async () => {
   // Both "Lille Oe" and "Lille.Oe" sanitize to "Lille_Oe"; the second must
   // get a suffix so the two interfaces do not overwrite each other's paths.
   const mockRns = {
@@ -317,7 +317,7 @@ test("per-interface ids are unique when names collide after sanitization", () =>
     },
   };
 
-  const values = formatStatusValues(
+  const values = await formatStatusValues(
     mockRns,
     null,
     null,
