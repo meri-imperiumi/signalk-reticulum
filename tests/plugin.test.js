@@ -16,6 +16,7 @@ const messaging = require("../plugin/messaging");
 const nomadnet = require("../plugin/nomadnet");
 const compression = require("../plugin/compression");
 const rfed = require("../plugin/rfed");
+const embeddedNodes = require("../plugin/embedded-nodes");
 const {
   buildTelemetrySensors,
   packTelemetry,
@@ -181,6 +182,27 @@ class FakeLxmRouter extends EventTarget {
   async syncFromPropagationNode(identity) {
     this.syncCalls += 1;
     return { received: 0, duplicates: 0 };
+  }
+  // Embedded propagation node: the real LXMRouter enables the propagation
+  // role via enablePropagation (returns the node) and re-announces its
+  // lxmf.propagation destination via announcePropagationNode. Recorded so a
+  // connectivity-change trigger can be asserted to refresh that destination.
+  enablePropagationCalls = [];
+  async enablePropagation(opts) {
+    this.enablePropagationCalls.push(opts);
+    return {
+      store: { size: 0 },
+      tickMaintenance: () => ({ aged: 0 }),
+      stampCost: 8,
+    };
+  }
+  enableAutopeerCalls = 0;
+  enableAutopeer(maxCost) {
+    this.enableAutopeerCalls += 1;
+  }
+  announcePropagationNodeCalls = 0;
+  async announcePropagationNode() {
+    this.announcePropagationNodeCalls += 1;
   }
 }
 FakeLxmRouter.instances = [];
@@ -914,6 +936,164 @@ test("an empty connectivity_paths list disables the trigger subscription", async
     ),
     "no connectivity subscription is set up",
   );
+
+  await plugin.stop();
+});
+
+test("a connectivity change re-announces the rfed.delivery destination", async () => {
+  // The external RFed client's subscriber destination must be refreshed on
+  // a Starlink/LTE transition so the federation node keeps routing live
+  // fanout to us over a working mesh path, instead of waiting up to the
+  // re-announce interval (PROTOCOL-SPEC.md §7.5 / §9.7).
+  const realClient = rfed.deps.RFedClient;
+  rfed.deps.RFedClient = FakeRFedClient;
+  FakeRFedClient.instances.length = 0;
+  try {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    FakeLxmRouter.instances.length = 0;
+
+    await plugin.start({
+      messaging: { display_name: "Boat" },
+      rfed: {
+        enabled: true,
+        node: RFED_NODE,
+        channel: "public.signalk.vessels",
+        receive_telemetry: true,
+      },
+    });
+
+    const client = plugin.rfed;
+    assert.ok(client, "rfed client brought up");
+    assert.ok(client.deliveryDest, "deliveryDest exposed by listen()");
+    assert.equal(
+      client.deliveryDest.announceCalls,
+      0,
+      "no connectivity re-announce yet",
+    );
+
+    app._onDelta({
+      updates: [
+        {
+          values: [
+            { path: "network.providers.starlink.status", value: "online" },
+          ],
+        },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(
+      client.deliveryDest.announceCalls,
+      1,
+      "rfed.delivery re-announced on connectivity change",
+    );
+    // LXMF delivery is re-announced alongside it.
+    assert.deepEqual(plugin.lxmf.announceCalls, ["Boat"]);
+
+    await plugin.stop();
+  } finally {
+    rfed.deps.RFedClient = realClient;
+  }
+});
+
+test("a connectivity change re-announces the embedded rfed federation node", async () => {
+  // When the server runs its own RFed federation node, a connectivity
+  // transition must refresh the path to rfed.node and every service
+  // destination so remote boats can keep path-requesting subscribe/publish/
+  // pull/notify over a working mesh path.
+  const realRFedNode = embeddedNodes.deps.RFedNode;
+  embeddedNodes.deps.RFedNode = class FakeRFedNode {
+    constructor(opts) {
+      this.opts = opts;
+      this.announceCalls = 0;
+    }
+    async start() {}
+    async announce() {
+      this.announceCalls += 1;
+    }
+    stop() {}
+    tickMaintenance() {
+      return { blobsEvicted: 0, deferredEvicted: 0 };
+    }
+  };
+  try {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    FakeLxmRouter.instances.length = 0;
+
+    await plugin.start({
+      messaging: { display_name: "Boat" },
+      embedded_nodes: { rfed: { enabled: true } },
+    });
+
+    const node = plugin.embeddedRfed;
+    assert.ok(node, "embedded rfed federation node brought up");
+    assert.equal(node.announceCalls, 0, "no connectivity re-announce yet");
+
+    app._onDelta({
+      updates: [
+        {
+          values: [
+            { path: "network.providers.starlink.status", value: "online" },
+          ],
+        },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    assert.equal(
+      node.announceCalls,
+      1,
+      "embedded rfed node re-announced on connectivity change",
+    );
+
+    await plugin.stop();
+  } finally {
+    embeddedNodes.deps.RFedNode = realRFedNode;
+  }
+});
+
+test("a connectivity change re-announces the embedded lxmf.propagation destination", async () => {
+  // When the server runs its own LXMF propagation node, a connectivity
+  // transition must refresh the path to lxmf.propagation so remote boats
+  // can keep syncing from / submitting to it over a working mesh path.
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+
+  await plugin.start({
+    messaging: { display_name: "Boat" },
+    embedded_nodes: { propagation: { enabled: true } },
+  });
+
+  assert.ok(plugin.embeddedPropagation, "embedded propagation node brought up");
+  const lxmf = plugin.lxmf;
+  // setupEmbeddedPropagationNode announces once at start.
+  assert.equal(
+    lxmf.announcePropagationNodeCalls,
+    1,
+    "initial announce at startup",
+  );
+
+  app._onDelta({
+    updates: [
+      {
+        values: [
+          { path: "network.providers.starlink.status", value: "online" },
+        ],
+      },
+    ],
+  });
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(
+    lxmf.announcePropagationNodeCalls,
+    2,
+    "lxmf.propagation re-announced on connectivity change",
+  );
+  // LXMF delivery is re-announced alongside it.
+  assert.deepEqual(lxmf.announceCalls, ["Boat"]);
 
   await plugin.stop();
 });
@@ -2208,6 +2388,14 @@ class FakeRFedClient {
   async listen(onMessage) {
     this.onMessage = onMessage;
     this.listenCalls = (this.listenCalls || 0) + 1;
+    // Mirror the real RFedClient: listen() creates the rfed.delivery
+    // destination and exposes it for re-announce (and app_data clearing).
+    this.deliveryDest = {
+      announceCalls: 0,
+      async announce() {
+        this.announceCalls += 1;
+      },
+    };
     return Buffer.from("11".repeat(16), "hex");
   }
   async subscribe(nodeHash, channel) {
