@@ -75,6 +75,10 @@ const deps = {
  * @param {object} options.identity - The Reticulum identity
  * @param {object} options.config - Plugin configuration
  * @param {string|null} options.dataDir - Plugin data directory (for storage)
+ * @param {number} [options.announceIntervalMs] - When positive, re-announce
+ *   the `lxmf.propagation` destination at this cadence so cached mesh paths
+ *   stay fresh (PROTOCOL-SPEC.md §7.5 / §9.7); 0/absent keeps the single
+ *   announce done at start.
  * @param {(...args:any[])=>void} options.log - Logger function
  * @returns {Promise<{node: object|null, teardown: ()=>void}>}
  */
@@ -82,6 +86,7 @@ async function setupEmbeddedPropagationNode({
   lxmf,
   config,
   dataDir,
+  announceIntervalMs,
   log = () => {},
 }) {
   if (!deps.loadLXMFStore || !deps.saveLXMFStore) {
@@ -151,8 +156,23 @@ async function setupEmbeddedPropagationNode({
         `peering cost ${peeringCost}${autopeer ? `, autopeer max cost ${autopeerMaxCost}` : ""})`,
     );
 
+    // Periodically re-announce the lxmf.propagation destination so cached
+    // mesh paths to it stay fresh (PROTOCOL-SPEC.md §7.5 / §9.7) — without
+    // this a transit relay evicts the path within minutes and remote boats
+    // can no longer sync from / submit to the node. 0/absent keeps the single
+    // announce done above.
+    let announceTimer = null;
+    if (announceIntervalMs && announceIntervalMs > 0) {
+      announceTimer = setInterval(() => {
+        Promise.resolve(lxmf.announcePropagationNode()).catch((e) =>
+          log(`LXMF propagation re-announce failed: ${e.message}`),
+        );
+      }, announceIntervalMs);
+    }
+
     // Set up periodic sync with configured propagation peers
     let syncTimer = null;
+    let initialSyncTimer = null;
     const peers = Array.isArray(propConfig.peers)
       ? propConfig.peers.filter((p) => typeof p === "string" && p.length === 32)
       : [];
@@ -166,7 +186,7 @@ async function setupEmbeddedPropagationNode({
         }
       };
       // Initial sync after 5 seconds
-      const _initialSync = setTimeout(syncOnce, 5000);
+      initialSyncTimer = setTimeout(syncOnce, 5000);
       // Periodic sync every 5 minutes
       const intervalMs = 5 * 60 * 1000;
       syncTimer = setInterval(syncOnce, intervalMs);
@@ -193,9 +213,10 @@ async function setupEmbeddedPropagationNode({
     }
 
     const teardown = () => {
-      if (initialSync) clearTimeout(initialSync);
+      if (initialSyncTimer) clearTimeout(initialSyncTimer);
       if (syncTimer) clearInterval(syncTimer);
       if (maintenanceTimer) clearInterval(maintenanceTimer);
+      if (announceTimer) clearInterval(announceTimer);
       // Final persist on shutdown
       if (dataDir && propagationNode?.store) {
         Promise.resolve()
@@ -234,6 +255,10 @@ async function setupEmbeddedPropagationNode({
  * @param {object} options.identity - The Reticulum identity
  * @param {object} options.config - Plugin configuration
  * @param {string|null} options.dataDir - Plugin data directory (for storage)
+ * @param {number} [options.announceIntervalMs] - When positive, re-announce
+ *   `rfed.node` and all the rfed service destinations at this cadence so
+ *   cached mesh paths stay fresh (PROTOCOL-SPEC.md §7.5 / §9.7); 0/absent
+ *   keeps the single announce done at start.
  * @param {(...args:any[])=>void} options.log - Logger function
  * @returns {Promise<{node: object|null, teardown: ()=>void}>}
  */
@@ -242,6 +267,7 @@ async function setupEmbeddedRFedNode({
   identity,
   config,
   dataDir,
+  announceIntervalMs,
   log = () => {},
 }) {
   if (!deps.loadRFedStores || !deps.saveRFedStores) {
@@ -328,6 +354,20 @@ async function setupEmbeddedRFedNode({
         `(stamp cost ${stampCost}, flex ${stampFlex})`,
     );
 
+    // Periodically re-announce rfed.node and every service destination so
+    // cached mesh paths to them stay fresh (PROTOCOL-SPEC.md §7.5 / §9.7) —
+    // without this a transit relay evicts the paths within minutes and remote
+    // boats can no longer path-request subscribe/publish/pull/notify. 0/
+    // absent keeps the single announce `node.start()` already did.
+    let announceTimer = null;
+    if (announceIntervalMs && announceIntervalMs > 0) {
+      announceTimer = setInterval(() => {
+        Promise.resolve(node.announce()).catch((e) =>
+          log(`RFed re-announce failed: ${e.message}`),
+        );
+      }, announceIntervalMs);
+    }
+
     // Set up periodic maintenance and persistence
     const maintenanceTimer = setInterval(async () => {
       try {
@@ -353,6 +393,7 @@ async function setupEmbeddedRFedNode({
 
     // Set up periodic sync with configured peers
     let syncTimer = null;
+    let initialSyncTimer = null;
     const peers = Array.isArray(rfedConfig.sync_peers)
       ? rfedConfig.sync_peers.filter(
           (p) => typeof p === "string" && p.length === 32,
@@ -370,7 +411,7 @@ async function setupEmbeddedRFedNode({
         }
       };
       // Initial sync after 5 seconds
-      const _initialSync = setTimeout(syncOnce, 5000);
+      initialSyncTimer = setTimeout(syncOnce, 5000);
       // Periodic sync every 5 minutes
       const intervalMs = 5 * 60 * 1000;
       syncTimer = setInterval(syncOnce, intervalMs);
@@ -378,8 +419,10 @@ async function setupEmbeddedRFedNode({
     }
 
     const teardown = () => {
-      clearInterval(maintenanceTimer);
+      if (initialSyncTimer) clearTimeout(initialSyncTimer);
       if (syncTimer) clearInterval(syncTimer);
+      clearInterval(maintenanceTimer);
+      if (announceTimer) clearInterval(announceTimer);
       if (node && typeof node.stop === "function") {
         node.stop();
       }

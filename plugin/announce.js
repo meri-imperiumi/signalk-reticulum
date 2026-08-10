@@ -44,11 +44,28 @@
  *   - The NomadNet site handle (as returned by {@link setupNomadNet}), or
  *   null/undefined when the site is disabled. Re-announced via
  *   `nomadnet.destination.announce()`.
+ * @param {{deliveryDest?:{announce:(()=>Promise<void>)|(()=>void)}}} [handles.rfed]
+ *   - The external RFed client (as returned by {@link setupRFed}), or
+ *   null/undefined when RFed runs embedded or is disabled. Re-announced via
+ *   `rfed.deliveryDest.announce()` so the federation node keeps treating us
+ *   as a live subscriber.
+ * @param {{announce:(()=>Promise<void>)|(()=>void)}} [handles.embeddedRfed]
+ *   - The embedded RFed federation node (as returned by {@link
+ *   setupEmbeddedRFedNode}), or null/undefined when none is running.
+ *   Re-announced via `node.announce()` (announces `rfed.node` + all service
+ *   destinations).
+ * @param {{announcePropagationNode:(()=>Promise<void>)|(()=>void)}} [handles.propagationLxmf]
+ *   - The LXMRouter running an embedded propagation node, or null/undefined
+ *   when none is running. Re-announced via
+ *   `lxmf.announcePropagationNode()`.
  * @param {(...args:any[])=>void} [log] - Signal K `app.debug`-style logger
  *   used to record each re-announce outcome.
  * @returns {Promise<number>} The number of destinations re-announced.
  */
-async function triggerAnnounce({ lxmf, displayName, nomadnet } = {}, log) {
+async function triggerAnnounce(
+  { lxmf, displayName, nomadnet, rfed, embeddedRfed, propagationLxmf } = {},
+  log,
+) {
   const debug = typeof log === "function" ? log : () => {};
   let announced = 0;
 
@@ -74,6 +91,42 @@ async function triggerAnnounce({ lxmf, displayName, nomadnet } = {}, log) {
       );
     } catch (e) {
       debug(`Failed to re-announce nomadnetwork.node: ${e.message}`);
+    }
+  }
+
+  const rfedDelivery = rfed && rfed.deliveryDest;
+  if (rfedDelivery && typeof rfedDelivery.announce === "function") {
+    try {
+      await rfedDelivery.announce();
+      announced += 1;
+      debug("Re-announced rfed.delivery destination (connectivity trigger)");
+    } catch (e) {
+      debug(`Failed to re-announce rfed.delivery: ${e.message}`);
+    }
+  }
+
+  if (embeddedRfed && typeof embeddedRfed.announce === "function") {
+    try {
+      await embeddedRfed.announce();
+      announced += 1;
+      debug(
+        "Re-announced embedded rfed federation node destinations (connectivity trigger)",
+      );
+    } catch (e) {
+      debug(`Failed to re-announce embedded rfed node: ${e.message}`);
+    }
+  }
+
+  if (
+    propagationLxmf &&
+    typeof propagationLxmf.announcePropagationNode === "function"
+  ) {
+    try {
+      await propagationLxmf.announcePropagationNode();
+      announced += 1;
+      debug("Re-announced lxmf.propagation destination (connectivity trigger)");
+    } catch (e) {
+      debug(`Failed to re-announce lxmf.propagation: ${e.message}`);
     }
   }
 

@@ -564,7 +564,12 @@ async function pullDeferredMessages(
  *
  * @param {object} rns - A Reticulum instance.
  * @param {object} identity - This node's Reticulum identity.
- * @param {{nodeHashHex:string, channel:string, subscribeIntervalMs?:number}} options
+ * @param {{nodeHashHex:string, channel:string, subscribeIntervalMs?:number, announceIntervalMs?:number}} options
+ *   `announceIntervalMs` re-announces the `rfed.delivery` destination at that
+ *   cadence (first announce already fired in `listen()`), keeping the
+ *   federation node's subscriber presence fresh and cached mesh paths alive
+ *   (PROTOCOL-SPEC.md §7.5 / §9.7); 0/absent falls back to the single
+ *   announce `listen()` did.
  * @param {(decoded:any)=>void} onMessage - Callback for each decoded fanout message.
  * @param {(...args:any[])=>void} [log]
  * @returns {Promise<{client:object, deliveryHashHex:string, teardown:()=>void}>}
@@ -581,9 +586,21 @@ async function setupRFed(rns, identity, options, onMessage, log) {
 
   // Announce our rfed.delivery destination and start receiving fanout.
   let deliveryHashHex = "";
+  let deliveryDest = null;
   try {
     const deliveryHash = await client.listen(onMessage);
     deliveryHashHex = deps.toHex(deliveryHash);
+    // `rfed.delivery` is a bare subscriber-delivery endpoint: it must not
+    // advertise the LXMF announce app_data that sharing an identity with the
+    // LXMRouter otherwise leaves on `identity.appData` (and which
+    // `Destination._emitAnnounce` falls back to when no per-destination
+    // override is set). Clear it so subsequent re-announces carry no
+    // app_data, matching a standalone RFed client. (The one announce
+    // `listen()` already broadcast is replaced on the next re-announce.)
+    deliveryDest = client.deliveryDest || null;
+    if (deliveryDest) {
+      deliveryDest.appData = new Uint8Array(0);
+    }
     debug(`Announced rfed.delivery destination ${deliveryHashHex}`);
   } catch (e) {
     debug(`rfed listen failed: ${e.message}`);
@@ -617,10 +634,32 @@ async function setupRFed(rns, identity, options, onMessage, log) {
     subscribeOnce().catch(() => {});
   }, intervalMs);
 
+  // Periodically re-announce rfed.delivery so the federation node keeps
+  // treating us as a live subscriber (presence TTL) and so cached mesh paths
+  // to it stay fresh — the same rationale as the LXMF / NomadNet re-announce
+  // loops. Without this, a transit relay evicts the path within minutes and
+  // the node can no longer route live fanout to us. 0/absent keeps the single
+  // announce `listen()` already did.
+  let announceTimer = null;
+  if (
+    options.announceIntervalMs &&
+    options.announceIntervalMs > 0 &&
+    deliveryDest
+  ) {
+    announceTimer = setInterval(() => {
+      Promise.resolve(deliveryDest.announce()).catch((e) =>
+        debug(`rfed.delivery re-announce failed: ${e.message}`),
+      );
+    }, options.announceIntervalMs);
+  }
+
   return {
     client,
     deliveryHashHex,
-    teardown: () => clearInterval(timer),
+    teardown: () => {
+      clearInterval(timer);
+      if (announceTimer) clearInterval(announceTimer);
+    },
   };
 }
 

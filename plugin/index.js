@@ -802,6 +802,7 @@ module.exports = (app) => {
               lxmf: plugin.lxmf,
               config,
               dataDir: dataDirPath,
+              announceIntervalMs,
               log: app.debug,
             });
             plugin.embeddedPropagation = embeddedProp.node;
@@ -832,6 +833,7 @@ module.exports = (app) => {
               identity: plugin.identity,
               config,
               dataDir: dataDirPath,
+              announceIntervalMs,
               log: app.debug,
             });
             plugin.embeddedRfed = embeddedRfed.node;
@@ -1267,7 +1269,11 @@ module.exports = (app) => {
               const rfedSetup = await setupRFed(
                 rns,
                 plugin.identity,
-                { nodeHashHex: nodeHex, channel: rfedChannel },
+                {
+                  nodeHashHex: nodeHex,
+                  channel: rfedChannel,
+                  announceIntervalMs,
+                },
                 onRFedMessage,
                 app.debug,
               );
@@ -1528,6 +1534,11 @@ module.exports = (app) => {
                       lxmf: plugin.lxmf,
                       displayName,
                       nomadnet: plugin.nomadnet,
+                      rfed: plugin.rfed,
+                      embeddedRfed: plugin.embeddedRfed,
+                      propagationLxmf: plugin.embeddedPropagation
+                        ? plugin.lxmf
+                        : undefined,
                     },
                     app.debug,
                   ),

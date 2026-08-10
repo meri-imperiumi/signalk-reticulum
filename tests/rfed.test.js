@@ -474,6 +474,18 @@ test("setupRFed announces the delivery destination, subscribes and re-subscribes
     }
     async listen(onMessage) {
       listenCalls.push(onMessage);
+      // Mirror the real RFedClient: listen() creates and announces the
+      // rfed.delivery destination, exposing it for re-announce / app_data.
+      this.deliveryDest = {
+        // Simulate the LXMF app_data an identity shared with the LXMRouter
+        // would otherwise leave inherited on the destination.
+        appData: "inherited-lxmf-appdata",
+        announceCalls: 0,
+        announce() {
+          this.announceCalls += 1;
+          return Promise.resolve();
+        },
+      };
       return fromHex("11".repeat(16));
     }
     async subscribe(nodeHash, channel) {
@@ -501,6 +513,17 @@ test("setupRFed announces the delivery destination, subscribes and re-subscribes
     assert.equal(listenCalls.length, 1);
     assert.equal(listenCalls[0], onMessage);
     assert.equal(setup.deliveryHashHex, "11".repeat(16));
+    // The inherited LXMF app_data is cleared so the bare rfed.delivery
+    // destination announces with no app_data, matching a standalone client.
+    assert.ok(setup.client.deliveryDest, "deliveryDest exposed by listen()");
+    assert.deepEqual(
+      [...setup.client.deliveryDest.appData],
+      [],
+      "rfed.delivery app_data cleared (no LXMF contamination)",
+    );
+    // No announce timer was started (no announceIntervalMs given), so the
+    // single announce listen() did is all there is.
+    assert.equal(setup.client.deliveryDest.announceCalls, 0);
     // Immediate subscribe fired synchronously after listen.
     assert.ok(subscribeCalls.length >= 1);
     assert.equal(subscribeCalls[0].channel, "public.signalk.vessels");
@@ -529,6 +552,94 @@ test("setupRFed requires a node hash and channel", async () => {
     ),
     /nodeHashHex and channel/,
   );
+});
+
+test("setupRFed re-announces rfed.delivery on the announce interval and stops on teardown", async () => {
+  /** A fake whose deliveryDest records every announce() call. */
+  class FakeRFedClient {
+    async listen() {
+      this.deliveryDest = {
+        appData: "inherited",
+        announceCalls: 0,
+        announce() {
+          this.announceCalls += 1;
+          return Promise.resolve();
+        },
+      };
+      return fromHex("11".repeat(16));
+    }
+    async subscribe() {
+      return { ok: true, stampCost: 0 };
+    }
+  }
+  const realClient = rfed.deps.RFedClient;
+  rfed.deps.RFedClient = FakeRFedClient;
+  try {
+    const identity = await Identity.generate();
+    const setup = await setupRFed(
+      { transport: { bindLocalDestination() {} } },
+      identity,
+      {
+        nodeHashHex: "cd".repeat(16),
+        channel: "public.signalk.vessels",
+        announceIntervalMs: 5,
+        subscribeIntervalMs: 1000,
+      },
+      () => {},
+      () => {},
+    );
+    // No immediate announce beyond the one listen() did (the loop fires on
+    // the interval, not at start, so airtime isn't wasted on a duplicate).
+    assert.equal(setup.client.deliveryDest.announceCalls, 0);
+    await new Promise((resolve) => setTimeout(resolve, 18));
+    assert.ok(
+      setup.client.deliveryDest.announceCalls >= 2,
+      "rfed.delivery re-announced on the interval",
+    );
+    const countAtTeardown = setup.client.deliveryDest.announceCalls;
+    setup.teardown();
+    await new Promise((resolve) => setTimeout(resolve, 18));
+    assert.equal(
+      setup.client.deliveryDest.announceCalls,
+      countAtTeardown,
+      "no more re-announces after teardown",
+    );
+  } finally {
+    rfed.deps.RFedClient = realClient;
+  }
+});
+
+test("setupRFed clears the inherited LXMF app_data on rfed.delivery even when listen fails", async () => {
+  // When listen() throws, deliveryDest is never created, so setupRFed must
+  // not crash trying to clear app_data — and no announce timer starts.
+  class FakeRFedClient {
+    async listen() {
+      throw new Error("listen boom");
+    }
+    async subscribe() {
+      throw new Error("subscribe boom");
+    }
+  }
+  const realClient = rfed.deps.RFedClient;
+  rfed.deps.RFedClient = FakeRFedClient;
+  try {
+    const identity = await Identity.generate();
+    const setup = await setupRFed(
+      { transport: { bindLocalDestination() {} } },
+      identity,
+      {
+        nodeHashHex: "cd".repeat(16),
+        channel: "public.signalk.vessels",
+        announceIntervalMs: 5,
+      },
+      () => {},
+      () => {},
+    );
+    assert.equal(setup.deliveryHashHex, "");
+    setup.teardown();
+  } finally {
+    rfed.deps.RFedClient = realClient;
+  }
 });
 
 test("setupRFed keeps coming up when listen/subscribe fail (best-effort)", async () => {

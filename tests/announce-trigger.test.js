@@ -115,6 +115,140 @@ test("triggerAnnounce tolerates a NomadNet destination without an announce metho
   assert.deepEqual(lxmf.announceCalls, ["My Boat"]);
 });
 
+test("triggerAnnounce re-announces the external rfed.delivery destination", async () => {
+  const rfed = {
+    deliveryDest: {
+      announceCalls: 0,
+      async announce() {
+        this.announceCalls += 1;
+      },
+    },
+  };
+  const logs = [];
+
+  const n = await triggerAnnounce({ rfed }, (msg) => logs.push(msg));
+
+  assert.equal(n, 1, "rfed.delivery announced");
+  assert.equal(rfed.deliveryDest.announceCalls, 1);
+  assert.ok(
+    logs.some((l) => /Re-announced rfed\.delivery/.test(l)),
+    "rfed.delivery re-announce logged",
+  );
+});
+
+test("triggerAnnounce re-announces the embedded rfed federation node", async () => {
+  const embeddedRfed = {
+    announceCalls: 0,
+    async announce() {
+      this.announceCalls += 1;
+    },
+  };
+  const logs = [];
+
+  const n = await triggerAnnounce({ embeddedRfed }, (msg) => logs.push(msg));
+
+  assert.equal(n, 1, "embedded rfed node announced");
+  assert.equal(embeddedRfed.announceCalls, 1);
+  assert.ok(
+    logs.some((l) => /Re-announced embedded rfed federation node/.test(l)),
+    "embedded rfed re-announce logged",
+  );
+});
+
+test("triggerAnnounce re-announces the embedded lxmf.propagation destination", async () => {
+  const propagationLxmf = {
+    announceCalls: 0,
+    async announcePropagationNode() {
+      this.announceCalls += 1;
+    },
+  };
+  const logs = [];
+
+  const n = await triggerAnnounce({ propagationLxmf }, (msg) => logs.push(msg));
+
+  assert.equal(n, 1, "lxmf.propagation announced");
+  assert.equal(propagationLxmf.announceCalls, 1);
+  assert.ok(
+    logs.some((l) => /Re-announced lxmf\.propagation/.test(l)),
+    "lxmf.propagation re-announce logged",
+  );
+});
+
+test("triggerAnnounce re-announces every destination at once on a connectivity change", async () => {
+  const lxmf = makeLxmf("My Boat");
+  const nomadnet = makeNomadnet();
+  const rfed = {
+    deliveryDest: {
+      announceCalls: 0,
+      async announce() {
+        this.announceCalls += 1;
+      },
+    },
+  };
+  const embeddedRfed = {
+    announceCalls: 0,
+    async announce() {
+      this.announceCalls += 1;
+    },
+  };
+  const propagationLxmf = {
+    announceCalls: 0,
+    async announcePropagationNode() {
+      this.announceCalls += 1;
+    },
+  };
+
+  const n = await triggerAnnounce(
+    {
+      lxmf,
+      displayName: "My Boat",
+      nomadnet,
+      rfed,
+      embeddedRfed,
+      propagationLxmf,
+    },
+    () => {},
+  );
+
+  assert.equal(n, 5, "all five destinations announced");
+  assert.deepEqual(lxmf.announceCalls, ["My Boat"]);
+  assert.equal(nomadnet.destination.announceCalls, 1);
+  assert.equal(rfed.deliveryDest.announceCalls, 1);
+  assert.equal(embeddedRfed.announceCalls, 1);
+  assert.equal(propagationLxmf.announceCalls, 1);
+});
+
+test("triggerAnnounce tolerates an rfed client without a deliveryDest", async () => {
+  const lxmf = makeLxmf("My Boat");
+  const n = await triggerAnnounce(
+    { lxmf, displayName: "My Boat", rfed: {} },
+    () => {},
+  );
+  assert.equal(n, 1, "only LXMF announced (rfed skipped)");
+});
+
+test("triggerAnnounce continues when the embedded rfed node announce fails", async () => {
+  const lxmf = makeLxmf("My Boat");
+  const embeddedRfed = {
+    async announce() {
+      throw new Error("rfed boom");
+    },
+  };
+  const logs = [];
+
+  const n = await triggerAnnounce(
+    { lxmf, displayName: "My Boat", embeddedRfed },
+    (msg) => logs.push(msg),
+  );
+
+  assert.equal(n, 1, "LXMF still announced after rfed failure");
+  assert.deepEqual(lxmf.announceCalls, ["My Boat"]);
+  assert.ok(
+    logs.some((l) => /Failed to re-announce embedded rfed node/.test(l)),
+    "rfed failure logged",
+  );
+});
+
 // --- connectivity path/value helpers --------------------------------------
 
 test("effectiveConnectivityPaths defaults to Starlink and LTE when unset", () => {

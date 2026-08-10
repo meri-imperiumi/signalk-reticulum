@@ -162,3 +162,168 @@ test("setupEmbeddedRFedNode teardown is always callable", async () => {
   assert.strictEqual(typeof result.teardown, "function");
   assert.doesNotThrow(() => result.teardown());
 });
+
+// --- periodic re-announce --------------------------------------------------
+
+test("setupEmbeddedPropagationNode re-announces lxmf.propagation on the interval and stops on teardown", async () => {
+  deps.loadLXMFStore = async () => ({ size: 0 });
+  deps.saveLXMFStore = async () => {};
+  const announceCalls = [];
+  const lxmf = {
+    enablePropagation: async () => ({ store: { size: 0 } }),
+    enableAutopeer: () => {},
+    announcePropagationNode: async () => {
+      announceCalls.push(Date.now());
+    },
+  };
+  try {
+    const result = await setupEmbeddedPropagationNode({
+      lxmf,
+      identity: {},
+      config: {},
+      dataDir: null,
+      announceIntervalMs: 5,
+      log: () => {},
+    });
+    // One announce fired at start (the explicit announcePropagationNode).
+    assert.equal(announceCalls.length, 1);
+    await new Promise((resolve) => setTimeout(resolve, 18));
+    assert.ok(
+      announceCalls.length >= 3,
+      "propagation re-announced on interval",
+    );
+    const countAtTeardown = announceCalls.length;
+    result.teardown();
+    await new Promise((resolve) => setTimeout(resolve, 18));
+    assert.equal(
+      announceCalls.length,
+      countAtTeardown,
+      "no more re-announces after teardown",
+    );
+  } finally {
+    Object.assign(deps, REAL_DEPS);
+  }
+});
+
+test("setupEmbeddedPropagationNode re-announces nothing when announceIntervalMs is 0", async () => {
+  deps.loadLXMFStore = async () => ({ size: 0 });
+  deps.saveLXMFStore = async () => {};
+  const announceCalls = [];
+  const lxmf = {
+    enablePropagation: async () => ({ store: { size: 0 } }),
+    enableAutopeer: () => {},
+    announcePropagationNode: async () => {
+      announceCalls.push(Date.now());
+    },
+  };
+  try {
+    const result = await setupEmbeddedPropagationNode({
+      lxmf,
+      identity: {},
+      config: {},
+      dataDir: null,
+      announceIntervalMs: 0,
+      log: () => {},
+    });
+    assert.equal(announceCalls.length, 1, "only the start announce");
+    await new Promise((resolve) => setTimeout(resolve, 18));
+    assert.equal(announceCalls.length, 1, "no periodic re-announce");
+    result.teardown();
+  } finally {
+    Object.assign(deps, REAL_DEPS);
+  }
+});
+
+test("setupEmbeddedPropagationNode teardown clears the initial peer-sync timer without throwing (regression)", async () => {
+  // Peers configured used to declare `const _initialSync` (block-scoped)
+  // then reference the undeclared `initialSync` in teardown → ReferenceError,
+  // so the sync timer was never cleared and the final store persist was
+  // skipped. Verify teardown now runs cleanly with peers configured.
+  deps.loadLXMFStore = async () => ({ size: 0 });
+  deps.saveLXMFStore = async () => {};
+  const lxmf = {
+    enablePropagation: async () => ({ store: { size: 0 } }),
+    enableAutopeer: () => {},
+    announcePropagationNode: async () => {},
+    syncPeers: async () => {},
+  };
+  try {
+    const result = await setupEmbeddedPropagationNode({
+      lxmf,
+      identity: {},
+      config: {
+        embedded_nodes: {
+          propagation: {
+            enabled: true,
+            peers: ["ab".repeat(16)],
+          },
+        },
+      },
+      dataDir: null,
+      announceIntervalMs: 0,
+      log: () => {},
+    });
+    assert.ok(result.node, "propagation node started");
+    assert.doesNotThrow(() => result.teardown());
+  } finally {
+    Object.assign(deps, REAL_DEPS);
+  }
+});
+
+test("setupEmbeddedRFedNode re-announces the node on the interval and stops on teardown", async () => {
+  deps.loadRFedStores = async () => ({
+    blobStore: { allMessageIds: () => [] },
+    subscriptions: [],
+    deferred: { totalLen: () => 0 },
+    notify: { count: 0 },
+  });
+  deps.saveRFedStores = async () => {};
+  const announceCalls = [];
+  /** A fake RFedNode that records announce() and start(). */
+  class FakeRFedNode {
+    constructor() {
+      this.blobStore = { allMessageIds: () => [] };
+      this.subscriptions = { length: 0 };
+      this.deferred = { totalLen: () => 0 };
+      this.notifyRegistry = { count: 0 };
+    }
+    async start() {
+      await this.announce();
+    }
+    announce() {
+      announceCalls.push(Date.now());
+      return Promise.resolve();
+    }
+    tickMaintenance() {
+      return { blobsEvicted: 0, deferredEvicted: 0 };
+    }
+    stop() {}
+  }
+  const realNode = deps.RFedNode;
+  deps.RFedNode = FakeRFedNode;
+  try {
+    const result = await setupEmbeddedRFedNode({
+      rns: {},
+      identity: {},
+      config: { embedded_nodes: { rfed: { enabled: true } } },
+      dataDir: null,
+      announceIntervalMs: 5,
+      log: () => {},
+    });
+    // One announce fired at start (RFedNode.start() → announce()).
+    assert.equal(announceCalls.length, 1);
+    await new Promise((resolve) => setTimeout(resolve, 18));
+    assert.ok(announceCalls.length >= 3, "rfed node re-announced on interval");
+    const countAtTeardown = announceCalls.length;
+    result.teardown();
+    await new Promise((resolve) => setTimeout(resolve, 18));
+    assert.equal(
+      announceCalls.length,
+      countAtTeardown,
+      "no more re-announces after teardown",
+    );
+  } finally {
+    deps.RFedNode = realNode;
+    Object.assign(deps, REAL_DEPS);
+  }
+});
