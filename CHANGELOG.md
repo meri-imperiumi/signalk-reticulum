@@ -1,5 +1,5 @@
 # Changelog
-## [Unreleased]
+## [0.4.2] - 2026-08-09
 ### Added
 - Destination hashes of the configured LXMF and RFed nodes are now published as Signal K deltas
 
