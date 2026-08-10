@@ -995,9 +995,12 @@ module.exports = (app) => {
         // includes interface status, link counts, destination table size,
         // and LXMF peer count.
         const statusIntervalMs = 60000;
-        const publishStatus = () => {
+        const publishStatus = async () => {
           try {
-            const values = formatStatusValues(
+            app.debug(
+              `publishStatus: embeddedPropagation=${!!plugin.embeddedPropagation}, embeddedRfed=${!!plugin.embeddedRfed}`,
+            );
+            const values = await formatStatusValues(
               rns,
               plugin.lxmf,
               plugin.nomadnet,

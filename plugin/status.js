@@ -65,11 +65,13 @@ function getInterfaceStats(iface) {
  * @param {object} [_lxmf] - Optional LXMF router instance
  * @param {object} [_nomadnet] - Optional NomadNet site instance
  * @param {object} [_rfed] - Optional RFed client instance
+ * @param {object} [_embeddedPropagation] - Optional embedded LXMF propagation node
+ * @param {object} [_embeddedRfed] - Optional embedded RFed federation node
  * @param {object} [identity] - Optional Reticulum identity instance
  * @param {string} [displayName] - Optional display name
- * @returns {{identityHash: string, displayName: string, interfaces: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number}}
+ * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, propagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
  */
-function getStatus(
+async function getStatus(
   rns,
   _lxmf,
   _nomadnet,
@@ -131,18 +133,41 @@ function getStatus(
   const embeddedPropagationRunning = !!_lxmf?.propagationNode;
   const embeddedRfedRunning = !!_embeddedRfed;
 
-  // Get propagation node stats
+  // Get propagation node stats and destination hash
   let propagationStored = 0;
-  if (embeddedPropagationRunning && _lxmf.propagationNode?.store) {
+  let propagationNodeHash = null;
+  if (embeddedPropagationRunning && _lxmf.propagationDest) {
     propagationStored = _lxmf.propagationNode.store.size || 0;
+    // Get the propagation node's destination hash from the destination
+    try {
+      if (_lxmf.propagationDest.destinationHash) {
+        propagationNodeHash = toHex(_lxmf.propagationDest.destinationHash);
+      }
+    } catch (e) {
+    }
   }
 
-  // Get RFed node stats
+  // Get RFed node stats and destination hash
   let rfedBlobsStored = 0;
   let rfedSubscriptions = 0;
-  if (embeddedRfedRunning && _embeddedRfed?.blobStore) {
-    rfedBlobsStored = _embeddedRfed.blobStore.allMessageIds().length || 0;
-    rfedSubscriptions = _embeddedRfed.subscriptions?.length || 0;
+  let rfedNodeHash = null;
+  if (embeddedRfedRunning) {
+    rfedBlobsStored = _embeddedRfed?.blobStore?.allMessageIds
+      ? _embeddedRfed.blobStore.allMessageIds().length || 0
+      : 0;
+    rfedSubscriptions = _embeddedRfed?.subscriptions?.length || 0;
+    // Derive the RFed node's destination hash from its identity
+    // For the node's own destination, use the node identity directly
+    try {
+      const {
+        deliveryHashFor,
+      } = require("@reticulum/core/src/rfed/channel.js");
+      const hashArray = await deliveryHashFor(_embeddedRfed.identity);
+      rfedNodeHash = toHex(hashArray);
+    } catch (e) {
+      // If we can't derive the hash, it's null
+      rfedNodeHash = null;
+    }
   }
 
   return {
@@ -154,6 +179,8 @@ function getStatus(
     interfacesConnected,
     bytesReceived,
     bytesTransmitted,
+    lxmfPropagationNode: propagationNodeHash,
+    rfedNode: rfedNodeHash,
     embeddedPropagationRunning,
     propagationStored,
     embeddedRfedRunning,
@@ -169,11 +196,13 @@ function getStatus(
  * @param {object} [lxmf] - Optional LXMF router instance
  * @param {object} [nomadnet] - Optional NomadNet site instance
  * @param {object} [rfed] - Optional RFed client instance
+ * @param {object} [embeddedPropagation] - Optional embedded LXMF propagation node
+ * @param {object} [embeddedRfed] - Optional embedded RFed federation node
  * @param {object} [identity] - Optional Reticulum identity instance
  * @param {string} [displayName] - Optional display name
- * @returns {{path: string, value: any}[]}
+ * @returns {Promise<{path: string, value: any}[]>}
  */
-function formatStatusValues(
+async function formatStatusValues(
   rns,
   lxmf,
   nomadnet,
@@ -183,7 +212,7 @@ function formatStatusValues(
   identity,
   displayName,
 ) {
-  const status = getStatus(
+  const status = await getStatus(
     rns,
     lxmf,
     nomadnet,
@@ -234,6 +263,14 @@ function formatStatusValues(
         bytesReceived: iface.rxb,
         bytesTransmitted: iface.txb,
       })),
+    },
+    {
+      path: "communication.reticulum.lxmfPropagationNode",
+      value: status.lxmfPropagationNode,
+    },
+    {
+      path: "communication.reticulum.rfedNode",
+      value: status.rfedNode,
     },
   ];
 
@@ -356,6 +393,26 @@ function getStatusMetadata() {
         displayName: "Bytes transmitted",
         description: "Total bytes transmitted across all interfaces",
         units: "bytes",
+      },
+    },
+    {
+      path: "communication.reticulum.lxmfPropagationNode",
+      value: {
+        displayName: "LXMF propagation node",
+        description:
+          "If running an embedded LXMF propagation node, the 32-character destination hash of the node. Otherwise null when not running an embedded propagation node.",
+        type: "string",
+        pattern: "^[0-9a-f]{32}$",
+      },
+    },
+    {
+      path: "communication.reticulum.rfedNode",
+      value: {
+        displayName: "RFed federation node",
+        description:
+          "If running an embedded RFed federation node, the 32-character destination hash of the node. Otherwise null when not running an embedded RFed.",
+        type: "string",
+        pattern: "^[0-9a-f]{32}$",
       },
     },
     {

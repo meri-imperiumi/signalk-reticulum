@@ -36,8 +36,8 @@ test("getStatusMetadata returns metadata for all paths", () => {
   }
 });
 
-test("formatStatusValues handles null/undefined RNS", () => {
-  const values = formatStatusValues(null, null, null, null);
+test("`formatStatusValues handles null/undefined RNS returns null/undefined RNS", async () => {
+  const values = await formatStatusValues(null, null, null, null);
 
   // Should still return values, just with defaults
   assert.ok(Array.isArray(values));
@@ -51,7 +51,7 @@ test("formatStatusValues handles null/undefined RNS", () => {
   assert.equal(identityHash.value, "");
 });
 
-test("formatStatusValues extracts interface info", () => {
+test("formatStatusValues extracts interface info", async () => {
   const mockIdentity = {
     identityHash: Buffer.from("0123456789abcdef0123456789abcdef", "hex"),
   };
@@ -89,7 +89,7 @@ test("formatStatusValues extracts interface info", () => {
     },
   };
 
-  const values = formatStatusValues(
+  const values = await formatStatusValues(
     mockRns,
     null,
     null,
