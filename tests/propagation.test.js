@@ -1,6 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
+const { Reticulum, Identity, toHex } = require("@reticulum/core");
+const { LXMRouter } = require("@reticulum/core/src/lxmf/index.js");
 const {
   deps,
   normalizeNodeHash,
@@ -8,6 +10,8 @@ const {
   syncFromNode,
   makePropagationDeliverer,
   makeAutoDeliverer,
+  submitToEmbeddedNode,
+  makeEmbeddedPropagationDeliverer,
 } = require("../plugin/propagation");
 
 const REAL_DEPS = { ...deps };
@@ -324,4 +328,171 @@ test("makeAutoDeliverer always uses direct delivery when no path check is given"
 
   assert.equal(direct.calls.length, 2, "direct used for both");
   assert.equal(propagation.calls.length, 0, "no fallback without a path check");
+});
+
+// --- embedded propagation node (real in-process LXMRouter) -----------------
+//
+// When the plugin runs its own propagation node, the node and its client
+// share one Reticulum instance and identity, so the link-based
+// `submitToPropagationNode` can't reach the local `lxmf.propagation`
+// destination (same loopback gap the embedded RFed fix addresses). These
+// smoketests exercise the in-process submit/deliver against a REAL LXMRouter
+// + PropagationNode — no fakes — to prove the embedded node stores messages
+// for remote recipients (store-and-forward) and auto-delivers messages
+// addressed to itself, exactly as a remote submitter's link would.
+
+/** Builds a real in-process LXMRouter with an embedded propagation node. */
+async function makeEmbeddedRouter({ stampCost = 0 } = {}) {
+  const rns = new Reticulum({ requireDestinationProof: false });
+  const identity = await Identity.generate();
+  const router = new LXMRouter(identity, rns);
+  await router.init();
+  const node = await router.enablePropagation({ stampCost });
+  await router.announcePropagationNode();
+  return { rns, identity, router, node };
+}
+
+/** Derives the `lxmf.delivery` hash for a given identity (recipient address). */
+async function deliveryHashFor(identity) {
+  const { Destination, DestType } = require("@reticulum/core");
+  const dest = await Destination.OUT(
+    "lxmf.delivery",
+    DestType.SINGLE,
+    identity,
+    null,
+  );
+  return dest.destinationHash;
+}
+
+/**
+ * Seeds `Destination.recall` for a recipient so `_packForPropagationSubmit`
+ * (which recalls the recipient identity to encrypt to it) succeeds in a test
+ * where the recipient has never announced over the mesh.
+ */
+async function rememberRecipient(identity, deliveryHash) {
+  const { Destination } = require("@reticulum/core");
+  const pub = await identity.getPublicKey();
+  await Destination.remember(deliveryHash, deliveryHash, pub, null);
+}
+
+test("submitToEmbeddedNode stores a message addressed to a remote recipient", async () => {
+  const { rns, identity, router, node } = await makeEmbeddedRouter();
+  try {
+    // A second identity plays the remote recipient.
+    const recipient = await Identity.generate();
+    const recipientHash = await deliveryHashFor(recipient);
+    await rememberRecipient(recipient, recipientHash);
+
+    const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
+    const message = new LXMessage({
+      sourceHash: router.deliveryDest.destinationHash,
+      destinationHash: recipientHash,
+      title: "Bilge alarm",
+      content: "Water rising!",
+    });
+
+    assert.equal(node.store.size, 0);
+    const result = await submitToEmbeddedNode(router, node, message, identity);
+    // The message is stored (not locally delivered — it's for a remote
+    // recipient), so the store grew by one.
+    assert.equal(node.store.size, 1);
+    assert.ok(result.transientId instanceof Uint8Array);
+    assert.ok(result.transientId.length > 0);
+  } finally {
+    await rns.stop();
+  }
+});
+
+test("submitToEmbeddedNode auto-delivers a message addressed to this node", async () => {
+  const { rns, identity, router, node } = await makeEmbeddedRouter();
+  try {
+    const received = [];
+    router.addEventListener("message", (event) => {
+      received.push(event.detail.message);
+    });
+
+    const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
+    const message = new LXMessage({
+      sourceHash: router.deliveryDest.destinationHash,
+      destinationHash: router.deliveryDest.destinationHash,
+      title: "Self test",
+      content: "hello me",
+    });
+
+    // The node's `onLocalDelivery` auto-delivers messages addressed to this
+    // node's own delivery hash — they are NOT stored.
+    assert.equal(node.store.size, 0);
+    // Seed our own delivery identity so _packForPropagationSubmit can recall it.
+    await rememberRecipient(identity, router.deliveryDest.destinationHash);
+    await submitToEmbeddedNode(router, node, message, identity);
+    assert.equal(node.store.size, 0, "not stored — auto-delivered");
+    assert.equal(received.length, 1, "message dispatched via event");
+    assert.equal(received[0].content, "hello me");
+  } finally {
+    await rns.stop();
+  }
+});
+
+test("makeEmbeddedPropagationDeliverer submits via the embedded node", async () => {
+  const { rns, identity, router, node } = await makeEmbeddedRouter();
+  try {
+    const recipient = await Identity.generate();
+    const recipientHashHex = toHex(await deliveryHashFor(recipient));
+    await rememberRecipient(recipient, Buffer.from(recipientHashHex, "hex"));
+
+    const deliver = makeEmbeddedPropagationDeliverer(
+      router,
+      node,
+      identity,
+      () => {},
+    );
+    assert.equal(node.store.size, 0);
+    await deliver(recipientHashHex, "Alert", "Bilge!");
+    assert.equal(node.store.size, 1, "message stored for the recipient");
+  } finally {
+    await rns.stop();
+  }
+});
+
+test("makeAutoDeliverer uses the embedded fallback only when no path is known", async () => {
+  const { rns, identity, router, node } = await makeEmbeddedRouter();
+  try {
+    const recipient = await Identity.generate();
+    const recipientHashHex = toHex(await deliveryHashFor(recipient));
+    await rememberRecipient(recipient, Buffer.from(recipientHashHex, "hex"));
+
+    const directCalls = [];
+    const directDeliver = async (hashHex) => {
+      directCalls.push(hashHex);
+    };
+    const propagationDeliver = makeEmbeddedPropagationDeliverer(
+      router,
+      node,
+      identity,
+      () => {},
+    );
+
+    // No path known -> store-and-forward via the embedded node.
+    const unreachable = new Set([recipientHashHex]);
+    const deliver = makeAutoDeliverer({
+      directDeliver,
+      propagationDeliver,
+      hasPath: (hash) => !unreachable.has(toHex(hash)),
+      fromHex: (hex) => Buffer.from(hex, "hex"),
+      debug: () => {},
+    });
+
+    assert.equal(node.store.size, 0);
+    await deliver(recipientHashHex, "Alert", "Bilge!");
+    assert.equal(directCalls.length, 0, "not delivered directly (no path)");
+    assert.equal(node.store.size, 1, "stored via embedded propagation");
+
+    // Path known -> direct delivery, no store.
+    unreachable.delete(recipientHashHex);
+    await deliver(recipientHashHex, "Alert", "Bilge!");
+    assert.equal(directCalls.length, 1, "delivered directly (path exists)");
+    assert.equal(node.store.size, 1, "no extra store entry");
+  } finally {
+    await rns.stop();
+  }
 });

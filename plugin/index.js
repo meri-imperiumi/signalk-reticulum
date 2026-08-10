@@ -44,6 +44,7 @@ const {
   syncFromNode,
   makePropagationDeliverer,
   makeAutoDeliverer,
+  makeEmbeddedPropagationDeliverer,
 } = require("./propagation");
 const {
   setupEmbeddedPropagationNode,
@@ -806,24 +807,18 @@ module.exports = (app) => {
             plugin.embeddedPropagation = embeddedProp.node;
             if (embeddedProp.node) {
               unsubscribes.push(embeddedProp.teardown);
-              app.debug("Embedded LXMF propagation node started");
 
-              // Periodically sync messages from the embedded propagation node
-              // (messages stored for this node while it was offline)
-              const syncIntervalMs = 5 * 60 * 1000; // 5 minutes
-              const syncOnce = () => {
-                syncFromNode(plugin.lxmf, plugin.identity, app.debug).catch(
-                  (e) =>
-                    app.debug(`Embedded propagation sync error: ${e.message}`),
-                );
-              };
-              // Initial sync after 10 seconds
-              const initialSync = setTimeout(syncOnce, 10000);
-              const syncTimer = setInterval(syncOnce, syncIntervalMs);
-              unsubscribes.push(() => {
-                clearTimeout(initialSync);
-                clearInterval(syncTimer);
-              });
+              // Receiving: no periodic sync is needed for an embedded node.
+              // The node's `onLocalDelivery` callback (wired in
+              // `enablePropagation`) auto-delivers any message addressed to
+              // this node's `lxmf.delivery` hash the moment it is ingested —
+              // whether submitted directly by a remote client or pulled in by
+              // peer sync. Messages are therefore never left sitting in the
+              // store addressed to us, so a link-based `syncFromNode` would
+              // both fail (the node's identity is never recallable in-process,
+              // same loopback gap as the embedded RFed fix) and have nothing
+              // to pull. The store-and-forward *send* fallback is wired below,
+              // after the direct deliverer is set up.
             }
           } catch (e) {
             app.debug(`Embedded propagation node setup error: ${e.message}`);
@@ -1012,6 +1007,43 @@ module.exports = (app) => {
         // closure wires up persistence, the periodic sync, and the
         // direct-first / propagation-fallback deliverer.
         alertDeliver = deliver;
+
+        // When an embedded propagation node is running and propagation is
+        // enabled, wire an in-process store-and-forward fallback. The
+        // embedded node and its client share one Reticulum instance, so the
+        // link-based `submitToPropagationNode` can't reach the local
+        // `lxmf.propagation` destination (same loopback gap the embedded RFed
+        // fix addresses). The in-process deliverer ingests directly instead,
+        // so an alert to an unreachable recipient is stored for them rather
+        // than silently dropped. A reachable recipient still gets direct
+        // delivery (promptly), exactly as the remote path does.
+        if (
+          config &&
+          config.propagation &&
+          config.propagation.enabled &&
+          plugin.embeddedPropagation
+        ) {
+          const propagationDeliver = makeEmbeddedPropagationDeliverer(
+            plugin.lxmf,
+            plugin.embeddedPropagation,
+            plugin.identity,
+            app.debug,
+          );
+          alertDeliver = makeAutoDeliverer({
+            directDeliver: deliver,
+            propagationDeliver,
+            hasPath:
+              rns.transport && typeof rns.transport.hasPath === "function"
+                ? rns.transport.hasPath.bind(rns.transport)
+                : undefined,
+            fromHex,
+            debug: app.debug,
+          });
+          app.debug(
+            "Embedded LXMF propagation node wired for store-and-forward",
+          );
+        }
+
         if (
           config &&
           config.propagation &&

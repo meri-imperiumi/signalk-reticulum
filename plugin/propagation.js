@@ -33,6 +33,9 @@
 const RNS = require("@reticulum/core");
 // LXMF moved out of the package root in @reticulum/core 0.6 — deep-import it.
 const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
+const {
+  unpackPropagationContainer,
+} = require("@reticulum/core/src/lxmf/propagation.js");
 
 /** Injected transport classes; tests swap these for fakes. */
 const deps = {
@@ -205,6 +208,98 @@ function makeAutoDeliverer({
   };
 }
 
+/**
+ * Submits a message to an *embedded* propagation node in-process, bypassing
+ * the link a remote {@link makePropagationDeliverer} establishes.
+ *
+ * When the plugin runs its own propagation node, the node and its client
+ * share one Reticulum instance and identity. A link-based
+ * `submitToPropagationNode` cannot reach the local `lxmf.propagation`
+ * destination (the node's own announce is never ingested, so its identity is
+ * never recallable, and an outbound packet to a local destination has no
+ * path) — the same in-process loopback gap the embedded RFed fix addresses.
+ *
+ * The message is packed with the router's canonical `_packForPropagationSubmit`
+ * (identical wire format to a remote submit: encrypted to the recipient,
+ * stamp appended), then the resulting blob is handed directly to
+ * `node.ingestBlobs`. The node stores it for a remote recipient (so other
+ * boats' LXMRouters can sync it) or auto-delivers it via `onLocalDelivery` if
+ * addressed to this node. The embedded node therefore behaves exactly like a
+ * regular propagation node to everything on the mesh.
+ *
+ * The stamp is generated at the node's configured `stampCost` (the same cost a
+ * remote submitter must meet); for a trusted local submit this is trivial PoW
+ * at alert cadence and keeps the node's stamp accounting consistent.
+ *
+ * @param {object} lxmf - An initialised LXMRouter with propagation enabled.
+ * @param {object} node - The embedded `PropagationNode` (`lxmf.propagationNode`).
+ * @param {object} message - An `LXMessage` ready for propagation.
+ * @param {object} senderIdentity - The sender Reticulum identity.
+ * @param {(...args:any[])=>void} [log]
+ * @returns {Promise<{transientId: Uint8Array, stampCost: number}>}
+ */
+async function submitToEmbeddedNode(lxmf, node, message, senderIdentity, log) {
+  const debug = typeof log === "function" ? log : () => {};
+  if (!lxmf || !node) {
+    throw new Error("Embedded propagation node not available.");
+  }
+  // Read the stamp cost directly from the node (no recall/link needed).
+  const stampCost = node.stampCost ?? 0;
+  // Pack into the propagation container — identical bytes to a remote submit.
+  const { container, transientId } = await lxmf._packForPropagationSubmit(
+    message,
+    senderIdentity,
+    stampCost,
+  );
+  // Unpack to the individual stamped blobs the node ingests (the link handler
+  // does the same on the receiving end of a Resource transfer).
+  const { messages } = unpackPropagationContainer(container);
+  const result = await node.ingestBlobs(messages);
+  debug(
+    `LXMF message submitted to the embedded propagation node ` +
+      `(${result.stored} stored, ${result.delivered} delivered, ` +
+      `${result.rejected} rejected, stamp cost ${stampCost})`,
+  );
+  return { transientId, stampCost };
+}
+
+/**
+ * Builds a `deliver(destinationHashHex, title, content, linkId?)` callback that
+ * submits a single LXMF message to an *embedded* propagation node in-process
+ * (the in-process counterpart to {@link makePropagationDeliverer}).
+ *
+ * Used by {@link makeAutoDeliverer} as the store-and-forward fallback when an
+ * embedded propagation node is running: a reachable recipient still gets direct
+ * delivery; an unreachable one has the message stored until they next sync.
+ *
+ * @param {object} lxmf - An initialised LXMRouter with propagation enabled.
+ * @param {object} node - The embedded `PropagationNode` (`lxmf.propagationNode`).
+ * @param {object} identity - The sender Reticulum identity.
+ * @param {(...args:any[])=>void} [debug]
+ * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null)=>Promise<void>}
+ */
+function makeEmbeddedPropagationDeliverer(
+  lxmf,
+  node,
+  identity,
+  debug = () => {},
+) {
+  return async function deliverViaEmbeddedPropagation(
+    destinationHashHex,
+    title,
+    content,
+    /* linkId — ignored, see makePropagationDeliverer */
+  ) {
+    const message = new deps.LXMessage({
+      sourceHash: lxmf.deliveryDest.destinationHash,
+      destinationHash: deps.fromHex(destinationHashHex),
+      title,
+      content,
+    });
+    await submitToEmbeddedNode(lxmf, node, message, identity, debug);
+  };
+}
+
 module.exports = {
   deps,
   normalizeNodeHash,
@@ -212,4 +307,6 @@ module.exports = {
   syncFromNode,
   makePropagationDeliverer,
   makeAutoDeliverer,
+  submitToEmbeddedNode,
+  makeEmbeddedPropagationDeliverer,
 };
