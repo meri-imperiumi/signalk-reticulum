@@ -150,6 +150,30 @@ async function setupEmbeddedPropagationNode({
       lxmf.enableAutopeer(autopeerMaxCost);
     }
 
+    // Set up static peering relationships with configured peers
+    const staticPeers = Array.isArray(propConfig.peers)
+      ? propConfig.peers.filter((p) => typeof p === "string" && p.length === 32)
+      : [];
+    for (const peerHex of staticPeers) {
+      try {
+        const peerHash = RNS.fromHex(peerHex);
+        // Request path to the peer so we can establish links for sync
+        lxmf.rns.transport
+          .requestPath(peerHash)
+          .catch((e) => log(`Path request for ${peerHex} failed: ${e.message}`));
+        lxmf.peer(peerHash, {
+          stampCost: 0,
+          stampCostFlexibility: 0,
+          peeringCost: peeringCost,
+          perTransferLimitKb: 256,
+          perSyncLimitKb: 10240,
+        });
+        log(`LXMF propagation peered with static node ${peerHex}`);
+      } catch (e) {
+        log(`Failed to peer with static LXMF node ${peerHex}: ${e.message}`);
+      }
+    }
+
     await lxmf.announcePropagationNode();
     log(
       `Embedded LXMF propagation node started (stamp cost ${stampCost}, ` +
@@ -170,13 +194,10 @@ async function setupEmbeddedPropagationNode({
       }, announceIntervalMs);
     }
 
-    // Set up periodic sync with configured propagation peers
+    // Set up periodic sync with propagation peers (static + autopeered)
     let syncTimer = null;
     let initialSyncTimer = null;
-    const peers = Array.isArray(propConfig.peers)
-      ? propConfig.peers.filter((p) => typeof p === "string" && p.length === 32)
-      : [];
-    if (peers.length > 0 && lxmf.syncPeers) {
+    if (lxmf.syncPeers) {
       const syncOnce = async () => {
         try {
           await lxmf.syncPeers();
@@ -190,7 +211,10 @@ async function setupEmbeddedPropagationNode({
       // Periodic sync every 5 minutes
       const intervalMs = 5 * 60 * 1000;
       syncTimer = setInterval(syncOnce, intervalMs);
-      log(`LXMF propagation syncing with ${peers.length} peer(s)`);
+      log(
+        `LXMF propagation sync timer started (static: ${staticPeers.length}, ` +
+          `autopeer: ${autopeer ? "enabled" : "disabled"})`,
+      );
     }
 
     // Periodic maintenance: prune old messages and persist store
