@@ -743,13 +743,43 @@ function makeEmbeddedShipTelemetryPublisher(node, senderIdentity, channel) {
  * outside: remote boats subscribe and publish via links exactly as they would
  * to any rfed node.
  *
+ * When `identity` is supplied, the local client is also registered as a
+ * channel subscriber directly in the node's `SubscriptionTable`. RFed peer
+ * sync (`syncWithPeer` → `gapFromPeer`) only requests blobs for channels that
+ * have at least one local subscription, and a link-based `/rfed/subscribe`
+ * can't reach a destination in the same Reticulum process (the same loopback
+ * gap this in-process client exists to bridge). Without registering, the
+ * telemetry channel would have zero subscriptions, so peer sync would pull
+ * nothing for it and the node's `rfedSubscriptions` status would read 0.
+ * Registering directly makes the node both federate *and* subscribe to the
+ * channel: remote peers' telemetry blobs for it are now pulled on sync, and
+ * the subscription count reflects reality. The entry is idempotent and
+ * removed on teardown.
+ *
+ * The local `rfed.delivery` destination is never announced in-process, so
+ * `_fanout`'s `isOnline` check is always false for the local subscriber —
+ * live delivery (which would throw "No route to host" for our own unannounced
+ * destination) is never attempted, and the blob is deferred instead. The
+ * `_fanout` wrapper below drains that just-enqueued copy right after delivering
+ * in-process, so the deferred queue (and its on-disk persistence) stays free
+ * of a stale, never-pulled backlog.
+ *
  * @param {object} node - An `RFedNode` (the embedded federation node).
  * @param {string} channel - The channel name to decode.
  * @param {(decoded:any)=>void} onMessage - Callback for each decoded message.
  * @param {(...args:any[])=>void} [log]
+ * @param {object} [identity] - This node's Reticulum identity. When supplied,
+ *   the local client is registered as a channel subscriber so peer sync pulls
+ *   the channel and the subscription count is non-zero.
  * @returns {Promise<{teardown:()=>void}>}
  */
-async function setupEmbeddedRFedClient(node, channel, onMessage, log) {
+async function setupEmbeddedRFedClient(
+  node,
+  channel,
+  onMessage,
+  log,
+  identity,
+) {
   const debug = typeof log === "function" ? log : () => {};
   if (!node) {
     return { teardown: () => {} };
@@ -764,19 +794,58 @@ async function setupEmbeddedRFedClient(node, channel, onMessage, log) {
   const channelDeliveryHash = await deliveryHashFor(channelIdentity);
   const expectedChannelHex = deps.toHex(expectedChannelHash);
 
+  // Register the local client as a channel subscriber directly in the node's
+  // SubscriptionTable (see the rationale above). Without this, peer sync's
+  // `gapFromPeer` filters the channel out (no local subscribers) and the
+  // telemetry topic is never synced from peers.
+  let localSubscriberHash = null;
+  if (
+    identity &&
+    node.subscriptions &&
+    typeof node.subscriptions.subscribe === "function"
+  ) {
+    try {
+      await node.subscriptions.subscribe(identity, expectedChannelHash);
+      localSubscriberHash = new Uint8Array(identity.identityHash);
+      debug(
+        `Registered local RFed subscription for channel "${channel}" so peer sync pulls it`,
+      );
+    } catch (e) {
+      debug(`Failed to register local RFed subscription: ${e.message}`);
+    }
+  }
+
   const originalFanout = node._fanout.bind(node);
   node._fanout = async (channelHash, innerBlob) => {
     await originalFanout(channelHash, innerBlob);
+    const isOurChannel =
+      channelHash &&
+      channelHash.length === DESTINATION_HASH_BYTES &&
+      deps.toHex(channelHash) === expectedChannelHex;
+    // The local subscription makes `originalFanout` defer this blob for local
+    // delivery (the local `rfed.delivery` is never announced in-process, so
+    // `isOnline` is false and live delivery is never attempted). We deliver
+    // in-process below instead, so drain the just-enqueued copy to keep the
+    // deferred queue (and its on-disk persistence) free of stale backlog.
+    if (
+      isOurChannel &&
+      localSubscriberHash &&
+      node.deferred &&
+      typeof node.deferred.drain === "function"
+    ) {
+      try {
+        node.deferred.drain(localSubscriberHash);
+      } catch {
+        /* best effort */
+      }
+    }
     // Decode and dispatch to the telemetry handler. The node's own echo is
     // dropped downstream by the self-identity guard; a malformed/foreign
     // blob is logged and never throws.
+    if (!isOurChannel) {
+      return;
+    }
     try {
-      if (!channelHash || channelHash.length !== DESTINATION_HASH_BYTES) {
-        return;
-      }
-      if (deps.toHex(channelHash) !== expectedChannelHex) {
-        return;
-      }
       const decoded = await unwrapChannelMessage({
         innerBlob,
         channelIdentity,
@@ -796,6 +865,23 @@ async function setupEmbeddedRFedClient(node, channel, onMessage, log) {
     teardown: () => {
       // Remove the own property so the prototype method is used again.
       delete node._fanout;
+      // Drop the local subscription we registered so it doesn't linger (e.g.
+      // across a reconfigure), inflating the count or pulling blobs the
+      // client no longer consumes.
+      if (
+        localSubscriberHash &&
+        node.subscriptions &&
+        typeof node.subscriptions.unsubscribe === "function"
+      ) {
+        try {
+          node.subscriptions.unsubscribe(
+            localSubscriberHash,
+            expectedChannelHash,
+          );
+        } catch {
+          /* best effort */
+        }
+      }
     },
   };
 }

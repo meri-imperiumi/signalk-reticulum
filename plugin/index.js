@@ -881,6 +881,12 @@ module.exports = (app) => {
                       rfedChannel,
                       onRFedMessage,
                       app.debug,
+                      // Pass our identity so the local client is registered as
+                      // a channel subscriber: peer sync only pulls blobs for
+                      // channels with a local subscription, and without this
+                      // the telemetry topic would never be synced (and the
+                      // `rfedSubscriptions` status would read 0).
+                      plugin.identity,
                     );
                     unsubscribes.push(rfedClient.teardown);
                     app.debug(

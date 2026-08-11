@@ -757,7 +757,11 @@ test("setupEmbeddedRFedClient decodes blobs the node ingests (simulated remote p
       DEFAULT_CHANNEL,
       (decoded) => received.push(decoded),
       () => {},
+      identity,
     );
+    // Passing the identity registers a local subscription so peer sync pulls
+    // the channel; the count reflects it and teardown removes it.
+    assert.equal(node.subscriptions.length, 1);
     // Simulate a remote boat's SEND payload arriving at the publish dest.
     const remote = await Identity.generate();
     const packed = encodeShipTelemetry(fullReadings());
@@ -767,6 +771,10 @@ test("setupEmbeddedRFedClient decodes blobs the node ingests (simulated remote p
       packed,
     );
     await node._handleSend(payload);
+    // The local subscription makes _fanout defer the blob for local delivery,
+    // but the wrapper drains it (we deliver in-process), so the deferred
+    // queue stays clean — no stale, never-pulled backlog accumulates.
+    assert.equal(node.deferred.totalLen(), 0);
 
     assert.equal(received.length, 1);
     const decoded = received[0];
@@ -783,6 +791,8 @@ test("setupEmbeddedRFedClient decodes blobs the node ingests (simulated remote p
     assert.equal(doc.vessel.name, "Meri Imperiumi");
     assert.equal(doc.vessel.mmsi, "230001234");
     client.teardown();
+    // Teardown removes the local subscription we registered.
+    assert.equal(node.subscriptions.length, 0);
   } finally {
     await node.stop();
     await rns.stop();
@@ -798,7 +808,9 @@ test("setupEmbeddedRFedClient delivers the node's own echo (self-identity guard 
       DEFAULT_CHANNEL,
       (decoded) => received.push(decoded),
       () => {},
+      identity,
     );
+    assert.equal(node.subscriptions.length, 1);
     const publish = makeEmbeddedShipTelemetryPublisher(
       node,
       identity,
@@ -829,8 +841,13 @@ test("setupEmbeddedRFedClient teardown restores the original fanout (no more del
       DEFAULT_CHANNEL,
       (decoded) => received.push(decoded),
       () => {},
+      identity,
     );
+    assert.equal(node.subscriptions.length, 1);
     client.teardown();
+    // Teardown removes the local subscription, so the channel has no
+    // subscribers again — matching the pre-setup state.
+    assert.equal(node.subscriptions.length, 0);
     const remote = await Identity.generate();
     const payload = await wrapRemoteSendPayload(
       DEFAULT_CHANNEL,
@@ -870,6 +887,80 @@ test("setupEmbeddedRFedClient ignores blobs for a different channel", async () =
     await node._handleSend(payload);
     assert.equal(received.length, 0);
     client.teardown();
+  } finally {
+    await node.stop();
+    await rns.stop();
+  }
+});
+
+test("setupEmbeddedRFedClient registers a local subscription so peer sync pulls the channel", async () => {
+  const { rns, identity, node } = await makeEmbeddedNode();
+  try {
+    const { deriveChannel } = require("@reticulum/core/src/rfed/channel.js");
+    const { gapFromPeer } = require("@reticulum/core/src/rfed/sync.js");
+    const { BlobStore } = require("@reticulum/core/src/rfed/index.js");
+    const { channelHash } = await deriveChannel(DEFAULT_CHANNEL);
+    const channelHex = toHex(channelHash);
+
+    // Before the client is wired up the channel has no subscribers, so peer
+    // sync's `gapFromPeer` would request nothing for it even if a peer held
+    // a telemetry blob — the bug this test pins down.
+    assert.equal(node.subscriptions.subscribedChannelHashes().length, 0);
+
+    const client = await setupEmbeddedRFedClient(
+      node,
+      DEFAULT_CHANNEL,
+      () => {},
+      () => {},
+      identity,
+    );
+    // The local client is now registered as a subscriber: the channel
+    // appears in `subscribedChannelHashes()` (the set peer sync filters on)
+    // and the status count reflects it.
+    assert.equal(node.subscriptions.length, 1);
+    const subscribed = node.subscriptions.subscribedChannelHashes();
+    assert.equal(subscribed.length, 1);
+    assert.equal(toHex(subscribed[0]), channelHex);
+
+    // Ingest a blob (simulated remote publish) the way peer sync surfaces one.
+    // It lands in the store and is fanned out; the wrapper delivers it
+    // in-process and drains the deferred copy.
+    const remote = await Identity.generate();
+    await node._handleSend(
+      await wrapRemoteSendPayload(
+        DEFAULT_CHANNEL,
+        remote,
+        encodeShipTelemetry(fullReadings()),
+      ),
+    );
+    assert.equal(node.deferred.totalLen(), 0);
+
+    // `gapFromPeer` is the pure function `syncWithPeer` uses to decide which
+    // of a peer's blobs to request. With the subscription registered, a peer
+    // holding this blob would have it requested (sync pulls the channel);
+    // without the subscription it returns nothing.
+    const manifest = node.blobStore.manifest();
+    assert.equal(manifest.length, 1);
+    assert.equal(toHex(manifest[0][0]), channelHex);
+    const wanted = gapFromPeer(
+      manifest,
+      new BlobStore(),
+      node.subscriptions.subscribedChannelHashes(),
+    );
+    assert.equal(wanted.length, 1);
+    assert.equal(toHex(wanted[0]), toHex(manifest[0][1]));
+
+    // Teardown drops the subscription so the channel is no longer pulled.
+    client.teardown();
+    assert.equal(node.subscriptions.subscribedChannelHashes().length, 0);
+    assert.equal(
+      gapFromPeer(
+        manifest,
+        new BlobStore(),
+        node.subscriptions.subscribedChannelHashes(),
+      ).length,
+      0,
+    );
   } finally {
     await node.stop();
     await rns.stop();
