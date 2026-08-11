@@ -357,6 +357,14 @@ async function setupEmbeddedRFedNode({
     };
   }
 
+  // Prepare static peers for FedSync (tracked regardless of announce presence)
+  const staticPeerHexes = Array.isArray(rfedConfig.sync_peers)
+    ? rfedConfig.sync_peers.filter(
+        (p) => typeof p === "string" && p.length === 32,
+      )
+    : [];
+  const staticPeers = staticPeerHexes.map((hex) => RNS.fromHex(hex));
+
   try {
     const node = new deps.RFedNode({
       identity,
@@ -369,6 +377,7 @@ async function setupEmbeddedRFedNode({
         storageLimitBytes,
         blobTtlSecs,
         deferredTtlSecs,
+        staticPeers,
       },
     });
 
@@ -415,23 +424,40 @@ async function setupEmbeddedRFedNode({
       }
     }, maintenanceInterval * 1000);
 
-    // Set up periodic sync with configured peers
+    // Request paths to static peers so the node can reach them for sync
+    for (const peerHex of staticPeerHexes) {
+      try {
+        rns.transport
+          .requestPath(RNS.fromHex(peerHex))
+          .catch((e) =>
+            log(`RFed path request for ${peerHex} failed: ${e.message}`),
+          );
+      } catch (e) {
+        log(`RFed failed to request path to ${peerHex}: ${e.message}`);
+      }
+    }
+
+    // Seed static peers as immediately-due sync targets
+    if (node.fedSync && typeof node.fedSync.seedStaticPeers === "function") {
+      node.fedSync.seedStaticPeers();
+    }
+
+    // Set up periodic sync with federation peers using FedSync's auto-sync.
+    // FedSync's peerHeard() acts as an allow-list: when staticPeers is
+    // non-empty only those are tracked; when empty, every announced rfed.node
+    // peer is auto-discovered. Either way syncPeers() is a no-op until a peer
+    // is due, so the timer is safe to run unconditionally (like the LXMF node).
     let syncTimer = null;
     let initialSyncTimer = null;
-    const peers = Array.isArray(rfedConfig.sync_peers)
-      ? rfedConfig.sync_peers.filter(
-          (p) => typeof p === "string" && p.length === 32,
-        )
-      : [];
-    if (peers.length > 0) {
+    if (typeof node.syncPeers === "function") {
       const syncOnce = async () => {
-        for (const peerHex of peers) {
-          try {
-            const n = await node.syncWithPeer(RNS.fromHex(peerHex));
-            if (n > 0) log(`RFed sync: ${n} blob(s) from ${peerHex}`);
-          } catch (e) {
-            log(`RFed sync with ${peerHex} failed: ${e.message}`);
+        try {
+          const totalBlobs = await node.syncPeers();
+          if (totalBlobs > 0) {
+            log(`RFed peer sync completed: ${totalBlobs} blob(s) ingested`);
           }
+        } catch (e) {
+          log(`RFed peer sync failed: ${e.message}`);
         }
       };
       // Initial sync after 5 seconds
@@ -439,7 +465,10 @@ async function setupEmbeddedRFedNode({
       // Periodic sync every 5 minutes
       const intervalMs = 5 * 60 * 1000;
       syncTimer = setInterval(syncOnce, intervalMs);
-      log(`RFed syncing with ${peers.length} peer(s)`);
+      log(
+        `RFed peer sync timer started (static: ${staticPeerHexes.length}, ` +
+          `${staticPeerHexes.length ? "allow-list" : "auto-discover"} mode)`,
+      );
     }
 
     const teardown = () => {
