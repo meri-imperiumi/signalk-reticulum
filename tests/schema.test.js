@@ -336,3 +336,27 @@ test("buildPluginUiSchema covers exactly every schema top-level property", () =>
     Object.keys(schema.properties).sort(),
   );
 });
+
+test("buildPluginSchema exposes the rfed embedded-node sync options (sync_peers + from_static_only)", () => {
+  const schema = buildPluginSchema([]);
+  const rfed = schema.properties.embedded_nodes.properties.rfed.properties;
+
+  // sync_peers: array of 32-hex destination hashes, empty by default.
+  assert.equal(rfed.sync_peers.type, "array");
+  assert.deepEqual(rfed.sync_peers.default, []);
+  assert.equal(rfed.sync_peers.items.pattern, "^[0-9a-fA-F]{32}$");
+  // Its description must reflect the 0.6.3 default (auto-discover + seeded
+  // static peers), not the old allow-list behaviour.
+  assert.match(
+    rfed.sync_peers.description,
+    /auto-discovers/, // describes the default track-all behaviour
+  );
+
+  // from_static_only: boolean, off by default (track every discovered peer).
+  assert.equal(rfed.from_static_only.type, "boolean");
+  assert.equal(rfed.from_static_only.default, false);
+  assert.match(
+    rfed.from_static_only.description,
+    /allow-list/, // documents the opt-in allow-list mode
+  );
+});

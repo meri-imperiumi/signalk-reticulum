@@ -160,7 +160,9 @@ async function setupEmbeddedPropagationNode({
         // Request path to the peer so we can establish links for sync
         lxmf.rns.transport
           .requestPath(peerHash)
-          .catch((e) => log(`Path request for ${peerHex} failed: ${e.message}`));
+          .catch((e) =>
+            log(`Path request for ${peerHex} failed: ${e.message}`),
+          );
         lxmf.peer(peerHash, {
           stampCost: 0,
           stampCostFlexibility: 0,
@@ -357,13 +359,24 @@ async function setupEmbeddedRFedNode({
     };
   }
 
-  // Prepare static peers for FedSync (tracked regardless of announce presence)
+  // Prepare static peers for FedSync (seeded as immediately-due sync targets
+  // regardless of announce presence).
   const staticPeerHexes = Array.isArray(rfedConfig.sync_peers)
     ? rfedConfig.sync_peers.filter(
         (p) => typeof p === "string" && p.length === 32,
       )
     : [];
   const staticPeers = staticPeerHexes.map((hex) => RNS.fromHex(hex));
+
+  // fromStaticOnly mirrors Rust `from_static_only` (added in
+  // @reticulum/core 0.6.3). The 0.6.3 default is `false`: FedSync tracks
+  // *every* announced `rfed.node` peer and additionally seeds the configured
+  // static peers for immediate sync — the federation-correct behaviour that
+  // matches the Rust `rfed` CLI (pre-0.6.3 the JS engine tracked only static
+  // peers whenever any were configured, diverging from Rust). Set to `true`
+  // to restrict federation to the configured `sync_peers` only (e.g. a boat
+  // on a slow/expensive link that wants to sync with trusted peers alone).
+  const fromStaticOnly = rfedConfig.from_static_only === true;
 
   try {
     const node = new deps.RFedNode({
@@ -378,6 +391,7 @@ async function setupEmbeddedRFedNode({
         blobTtlSecs,
         deferredTtlSecs,
         staticPeers,
+        fromStaticOnly,
       },
     });
 
@@ -437,16 +451,15 @@ async function setupEmbeddedRFedNode({
       }
     }
 
-    // Seed static peers as immediately-due sync targets
-    if (node.fedSync && typeof node.fedSync.seedStaticPeers === "function") {
-      node.fedSync.seedStaticPeers();
-    }
-
     // Set up periodic sync with federation peers using FedSync's auto-sync.
-    // FedSync's peerHeard() acts as an allow-list: when staticPeers is
-    // non-empty only those are tracked; when empty, every announced rfed.node
-    // peer is auto-discovered. Either way syncPeers() is a no-op until a peer
-    // is due, so the timer is safe to run unconditionally (like the LXMF node).
+    // As of @reticulum/core 0.6.3, RFedNode.start() already sets the local
+    // node hash and seeds the configured static peers as immediately-due sync
+    // targets, so we no longer call fedSync.seedStaticPeers() ourselves.
+    // FedSync's default (fromStaticOnly = false) tracks *every* announced
+    // rfed.node peer and seeds the static peers; with fromStaticOnly = true it
+    // tracks only the static peers (an explicit allow-list). Either way
+    // syncPeers() is a no-op until a peer is due, so the timer is safe to run
+    // unconditionally (like the LXMF node).
     let syncTimer = null;
     let initialSyncTimer = null;
     if (typeof node.syncPeers === "function") {
@@ -466,8 +479,8 @@ async function setupEmbeddedRFedNode({
       const intervalMs = 5 * 60 * 1000;
       syncTimer = setInterval(syncOnce, intervalMs);
       log(
-        `RFed peer sync timer started (static: ${staticPeerHexes.length}, ` +
-          `${staticPeerHexes.length ? "allow-list" : "auto-discover"} mode)`,
+        `RFed peer sync timer started (static peers: ${staticPeerHexes.length}, ` +
+          `${fromStaticOnly ? "static-only" : "auto-discover"} mode)`,
       );
     }
 

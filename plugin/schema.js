@@ -835,8 +835,11 @@ function buildPluginSchema(interfaces) {
                 description:
                   "List of 32-character hexadecimal destination hashes of " +
                   "other RFed federation nodes to sync with periodically. " +
-                  "Blobs are exchanged on sync. Leave empty for no static " +
-                  "peers.",
+                  "These are seeded as immediately-due sync targets (sync " +
+                  "fires on startup). By default the node also auto-discovers " +
+                  "and syncs with every other rfed.node peer it hears on the " +
+                  "mesh; enable 'from_static_only' to restrict federation to " +
+                  "just these peers. Leave empty for no static peers.",
                 default: [],
                 items: {
                   type: "string",
@@ -844,6 +847,22 @@ function buildPluginSchema(interfaces) {
                   minLength: 32,
                   maxLength: 32,
                 },
+              },
+              from_static_only: {
+                type: "boolean",
+                title: "Sync only with the static peers above",
+                description:
+                  "When enabled, the node only syncs with the federation " +
+                  "peers listed under 'sync_peers' and ignores every other " +
+                  "rfed.node peer discovered on the mesh (an explicit " +
+                  "allow-list). When disabled (the default), the node syncs " +
+                  "with every discovered rfed.node peer and additionally seeds " +
+                  "the 'sync_peers' for immediate sync — the federation " +
+                  "behaviour matching the Rust rfed CLI. Useful on a slow or " +
+                  "expensive link where you only want to federate with " +
+                  "trusted peers. Requires at least one 'sync_peers' entry " +
+                  "to have any effect.",
+                default: false,
               },
             },
             additionalProperties: false,

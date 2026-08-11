@@ -327,3 +327,148 @@ test("setupEmbeddedRFedNode re-announces the node on the interval and stops on t
     Object.assign(deps, REAL_DEPS);
   }
 });
+
+// --- FedSync config forwarding (0.6.3 fromStaticOnly) ----------------------
+
+/**
+ * A fake RFedNode that captures the constructor options so a test can assert
+ * on the config forwarded to FedSync (staticPeers / fromStaticOnly), records
+ * announce/start/stop, and exposes the stores teardown touches.
+ */
+class CapturingRFedNode {
+  constructor(opts) {
+    CapturingRFedNode.lastOptions = opts;
+    this.blobStore = { allMessageIds: () => [] };
+    this.subscriptions = { length: 0 };
+    this.deferred = { totalLen: () => 0 };
+    this.notifyRegistry = { count: 0 };
+    // Expose the config the plugin passed so tests can read it off the node.
+    this.config = opts?.config;
+    // A real fedSync the plugin may poke; start() now seeds it, so the plugin
+    // must NOT call seedStaticPeers() itself.
+    this.fedSync = {
+      seedStaticPeersCalls: 0,
+      seedStaticPeers() {
+        this.seedStaticPeersCalls++;
+      },
+      localNodeHash: null,
+    };
+  }
+  async start() {
+    await this.announce();
+  }
+  announce() {
+    return Promise.resolve();
+  }
+  tickMaintenance() {
+    return { blobsEvicted: 0, deferredEvicted: 0 };
+  }
+  stop() {}
+}
+
+/** Shared store fakes for the RFed-node tests below. */
+function rfedStoreFakes() {
+  deps.loadRFedStores = async () => ({
+    blobStore: { allMessageIds: () => [] },
+    subscriptions: [],
+    deferred: { totalLen: () => 0 },
+    notify: { count: 0 },
+  });
+  deps.saveRFedStores = async () => {};
+}
+
+test("setupEmbeddedRFedNode forwards staticPeers and fromStaticOnly=false (default) to the RFedNode config", async () => {
+  rfedStoreFakes();
+  const realNode = deps.RFedNode;
+  deps.RFedNode = CapturingRFedNode;
+  try {
+    await setupEmbeddedRFedNode({
+      rns: { transport: { requestPath: () => Promise.resolve() } },
+      identity: {},
+      config: {
+        embedded_nodes: {
+          rfed: {
+            enabled: true,
+            sync_peers: ["ab".repeat(16)],
+            // from_static_only omitted -> default false
+          },
+        },
+      },
+      dataDir: null,
+      log: () => {},
+    });
+    const cfg = CapturingRFedNode.lastOptions.config;
+    assert.deepEqual(
+      cfg.staticPeers.map((h) => h.length),
+      [16],
+      "static peer bytes forwarded",
+    );
+    assert.equal(cfg.fromStaticOnly, false, "default is track-all");
+  } finally {
+    deps.RFedNode = realNode;
+    Object.assign(deps, REAL_DEPS);
+  }
+});
+
+test("setupEmbeddedRFedNode forwards fromStaticOnly=true when from_static_only is enabled", async () => {
+  rfedStoreFakes();
+  const realNode = deps.RFedNode;
+  deps.RFedNode = CapturingRFedNode;
+  try {
+    await setupEmbeddedRFedNode({
+      rns: { transport: { requestPath: () => Promise.resolve() } },
+      identity: {},
+      config: {
+        embedded_nodes: {
+          rfed: {
+            enabled: true,
+            sync_peers: ["cd".repeat(16)],
+            from_static_only: true,
+          },
+        },
+      },
+      dataDir: null,
+      log: () => {},
+    });
+    const cfg = CapturingRFedNode.lastOptions.config;
+    assert.equal(cfg.fromStaticOnly, true, "allow-list mode forwarded");
+  } finally {
+    deps.RFedNode = realNode;
+    Object.assign(deps, REAL_DEPS);
+  }
+});
+
+test("setupEmbeddedRFedNode does not call fedSync.seedStaticPeers() itself (RFedNode.start() does it in 0.6.3)", async () => {
+  // Pre-0.6.3 the plugin manually called node.fedSync.seedStaticPeers() after
+  // start(); 0.6.3 moved that into RFedNode.start(), so the plugin must no
+  // longer call it (a redundant re-seed). Assert it is left untouched here.
+  rfedStoreFakes();
+  const realNode = deps.RFedNode;
+  deps.RFedNode = CapturingRFedNode;
+  try {
+    const result = await setupEmbeddedRFedNode({
+      rns: { transport: { requestPath: () => Promise.resolve() } },
+      identity: {},
+      config: {
+        embedded_nodes: {
+          rfed: {
+            enabled: true,
+            sync_peers: ["ab".repeat(16)],
+          },
+        },
+      },
+      dataDir: null,
+      log: () => {},
+    });
+    assert.ok(result.node, "rfed node started");
+    assert.equal(
+      result.node.fedSync.seedStaticPeersCalls,
+      0,
+      "plugin does not seed static peers itself",
+    );
+    result.teardown();
+  } finally {
+    deps.RFedNode = realNode;
+    Object.assign(deps, REAL_DEPS);
+  }
+});
