@@ -69,7 +69,7 @@ function getInterfaceStats(iface) {
  * @param {object} [_embeddedRfed] - Optional embedded RFed federation node
  * @param {object} [identity] - Optional Reticulum identity instance
  * @param {string} [displayName] - Optional display name
- * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, propagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
+ * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
  */
 async function getStatus(
   rns,
@@ -134,10 +134,10 @@ async function getStatus(
   const embeddedRfedRunning = !!_embeddedRfed;
 
   // Get propagation node stats and destination hash
-  let propagationStored = 0;
+  let lxmfPropagationStored = 0;
   let propagationNodeHash = null;
   if (embeddedPropagationRunning && _lxmf.propagationDest) {
-    propagationStored = _lxmf.propagationNode.store.size || 0;
+    lxmfPropagationStored = _lxmf.propagationNode.store.size || 0;
     // Get the propagation node's destination hash from the destination
     try {
       if (_lxmf.propagationDest.destinationHash) {
@@ -179,7 +179,7 @@ async function getStatus(
     lxmfPropagationNode: propagationNodeHash,
     rfedNode: rfedNodeHash,
     embeddedPropagationRunning,
-    propagationStored,
+    lxmfPropagationStored,
     embeddedRfedRunning,
     rfedBlobsStored,
     rfedSubscriptions,
@@ -295,8 +295,8 @@ async function formatStatusValues(
       value: status.embeddedPropagationRunning,
     },
     {
-      path: "communication.reticulum.propagationStored",
-      value: status.propagationStored,
+      path: "communication.reticulum.lxmfPropagationStored",
+      value: status.lxmfPropagationStored,
     },
     {
       path: "communication.reticulum.embeddedRfedRunning",
@@ -422,9 +422,9 @@ function getStatusMetadata() {
       },
     },
     {
-      path: "communication.reticulum.propagationStored",
+      path: "communication.reticulum.lxmfPropagationStored",
       value: {
-        displayName: "Propagation stored messages",
+        displayName: "LXMF propagation stored messages",
         description:
           "Number of messages stored in the embedded LXMF propagation node",
         units: "count",
