@@ -1,5 +1,5 @@
 # Changelog
-## [Unreleased]
+## [0.4.7] - 2026-08-12
 ### Changed
 - Renamed `communication.reticulum.propagationStored` to `communication.reticulum.lxmfPropagationStored` for consistency with RFed status paths (`rfedNode`/`rfedBlobsStored`). Both LXMF and RFed embedded nodes now follow the same naming pattern (`lxmfPropagationNode`/`lxmfPropagationStored`, `rfedNode`/`rfedBlobsStored`).
 ### Fixed
