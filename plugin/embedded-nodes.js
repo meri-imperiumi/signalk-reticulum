@@ -321,9 +321,15 @@ async function setupEmbeddedRFedNode({
     Number(rfedConfig.deferred_ttl_days) || DEFERRED_TTL_DAYS_DEFAULT;
   const storageLimitMb = Number(rfedConfig.storage_limit_mb) || null;
 
+  // `undefined` (not `null`) when unset so the `BlobStore` applies its built-in
+  // 2 GiB spec default (`DEFAULT_STORAGE_LIMIT_BYTES`). Passing `null` would
+  // bypass that default — the constructor only substitutes it for `undefined` —
+  // and `_evictToFit` would then read `usedBytes + neededBytes <= null` as
+  // `<= 0`, evicting every previously stored blob on each ingest and leaving
+  // `communication.reticulum.rfedBlobsStored` stuck at 1.
   const storageLimitBytes = storageLimitMb
     ? storageLimitMb * 1000 * 1000
-    : null;
+    : undefined;
   const blobTtlSecs = blobTtlDays * 24 * 3600;
   const deferredTtlSecs = deferredTtlDays * 24 * 3600;
 

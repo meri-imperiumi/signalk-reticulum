@@ -1,4 +1,7 @@
 # Changelog
+## [Unreleased]
+### Fixed
+- Embedded RFed federation node now retains every published blob, so `communication.reticulum.rfedBlobsStored` rises with each publish instead of staying pinned at `1`. When `embedded_nodes.rfed.storage_limit_mb` was left unset (the default), the plugin passed `storageLimitBytes: null` through to the `BlobStore`; the store only applies its built-in 2 GiB spec default for `undefined` (not `null`), so `_evictToFit` read `null` as a `0`-byte cap and evicted every previously stored blob on each ingest — every new publish replaced the last, leaving the count at `1`. The plugin now passes `undefined` when no limit is configured, so the 2 GiB default applies and blobs accumulate as intended. Covered by a real-integration smoketest that drives `setupEmbeddedRFedNode` with a `dataDir` and no storage limit and asserts three publishes yield three stored blobs (and that `blobStore.storageLimitBytes` is the 2 GiB default, not `null`).
 ## [0.4.6] - 2026-08-11
 ### Fixed
 - Updated reticulum-js to 0.6.4 for some RFed node improvements

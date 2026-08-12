@@ -1,11 +1,19 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const os = require("node:os");
+const fs = require("node:fs");
+const path = require("node:path");
 
+const { Reticulum, Identity } = require("@reticulum/core");
 const {
   deps,
   setupEmbeddedPropagationNode,
   setupEmbeddedRFedNode,
 } = require("../plugin/embedded-nodes");
+const {
+  makeEmbeddedShipTelemetryPublisher,
+  DEFAULT_CHANNEL,
+} = require("../plugin/rfed");
 
 const REAL_DEPS = { ...deps };
 
@@ -469,6 +477,66 @@ test("setupEmbeddedRFedNode does not call fedSync.seedStaticPeers() itself (RFed
     result.teardown();
   } finally {
     deps.RFedNode = realNode;
+    Object.assign(deps, REAL_DEPS);
+  }
+});
+
+// Regression: when `storage_limit_mb` is unset (the default), the embedded
+// RFed node must keep *every* published blob, not just the latest. The
+// plugin used to pass `storageLimitBytes: null` when the option was unset;
+// `BlobStore` only applies its 2 GiB spec default for `undefined` (not
+// `null`), so `null` was read as a 0-byte cap by `_evictToFit` — every ingest
+// evicted the previous blob and `rfedBlobsStored` stayed pinned at 1. This
+// drives the real `loadRFedStores` dataDir path (no storage limit set) end
+// to end with a real Reticulum + RFedNode and publishes three snapshots.
+test("setupEmbeddedRFedNode keeps every published blob when storage_limit_mb is unset", async () => {
+  Object.assign(deps, REAL_DEPS);
+  assert.equal(
+    typeof deps.loadRFedStores,
+    "function",
+    "real @reticulum/node storage available",
+  );
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "signalk-rfed-storage-"),
+  );
+  const rns = new Reticulum({ requireDestinationProof: false });
+  const identity = await Identity.generate();
+  let result;
+  try {
+    result = await setupEmbeddedRFedNode({
+      rns,
+      identity,
+      config: { embedded_nodes: { rfed: { enabled: true } } },
+      dataDir: tmpDir,
+      announceIntervalMs: 0,
+      log: () => {},
+    });
+    assert.ok(result.node, "rfed node started");
+    // The store must have fallen back to the built-in 2 GiB default, not null.
+    assert.equal(
+      result.node.blobStore.storageLimitBytes,
+      2 * 1024 * 1024 * 1024,
+      "unset storage_limit_mb uses the 2 GiB default",
+    );
+    const publish = makeEmbeddedShipTelemetryPublisher(
+      result.node,
+      identity,
+      DEFAULT_CHANNEL,
+    );
+    const packed = new Uint8Array([1, 2, 3, 4]);
+    assert.equal(result.node.blobStore.allMessageIds().length, 0);
+    await publish(packed);
+    await publish(packed);
+    await publish(packed);
+    assert.equal(
+      result.node.blobStore.allMessageIds().length,
+      3,
+      "every published blob is retained",
+    );
+  } finally {
+    if (result) result.teardown();
+    await rns.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
     Object.assign(deps, REAL_DEPS);
   }
 });
