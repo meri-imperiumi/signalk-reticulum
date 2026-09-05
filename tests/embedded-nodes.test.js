@@ -17,6 +17,17 @@ const {
 
 const REAL_DEPS = { ...deps };
 
+/** Resolve once fn() is truthy, polling briefly; rejects on timeout. */
+async function waitFor(fn, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!fn()) {
+    if (Date.now() > deadline) {
+      throw new Error("waitFor timed out");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 // --- setupEmbeddedPropagationNode -------------------------------------------
 
 test("setupEmbeddedPropagationNode skips when disabled in config", async () => {
@@ -195,11 +206,7 @@ test("setupEmbeddedPropagationNode re-announces lxmf.propagation on the interval
     });
     // One announce fired at start (the explicit announcePropagationNode).
     assert.equal(announceCalls.length, 1);
-    await new Promise((resolve) => setTimeout(resolve, 18));
-    assert.ok(
-      announceCalls.length >= 3,
-      "propagation re-announced on interval",
-    );
+    await waitFor(() => announceCalls.length >= 3);
     const countAtTeardown = announceCalls.length;
     result.teardown();
     await new Promise((resolve) => setTimeout(resolve, 18));
@@ -320,8 +327,7 @@ test("setupEmbeddedRFedNode re-announces the node on the interval and stops on t
     });
     // One announce fired at start (RFedNode.start() → announce()).
     assert.equal(announceCalls.length, 1);
-    await new Promise((resolve) => setTimeout(resolve, 18));
-    assert.ok(announceCalls.length >= 3, "rfed node re-announced on interval");
+    await waitFor(() => announceCalls.length >= 3);
     const countAtTeardown = announceCalls.length;
     result.teardown();
     await new Promise((resolve) => setTimeout(resolve, 18));

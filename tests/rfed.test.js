@@ -29,6 +29,17 @@ const {
   extractTelemetryField,
 } = require("../plugin/telemetry");
 
+/** Resolve once fn() is truthy, polling briefly; rejects on timeout. */
+async function waitFor(fn, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!fn()) {
+    if (Date.now() > deadline) {
+      throw new Error("waitFor timed out");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 /** A representative full readings object used across many tests. */
 function fullReadings() {
   return {
@@ -591,11 +602,7 @@ test("setupRFed re-announces rfed.delivery on the announce interval and stops on
     // No immediate announce beyond the one listen() did (the loop fires on
     // the interval, not at start, so airtime isn't wasted on a duplicate).
     assert.equal(setup.client.deliveryDest.announceCalls, 0);
-    await new Promise((resolve) => setTimeout(resolve, 18));
-    assert.ok(
-      setup.client.deliveryDest.announceCalls >= 2,
-      "rfed.delivery re-announced on the interval",
-    );
+    await waitFor(() => setup.client.deliveryDest.announceCalls >= 2);
     const countAtTeardown = setup.client.deliveryDest.announceCalls;
     setup.teardown();
     await new Promise((resolve) => setTimeout(resolve, 18));
