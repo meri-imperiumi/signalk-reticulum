@@ -1,4 +1,9 @@
 # Changelog
+## [Unreleased]
+### Added
+- Alerts that stay cleared now produce a plain text clearing message to the crew, with the same hysteresis as the alert messages so rapidly flapping alerts (like bilge sensors) only produce one alert and one clearing message. The clearing message reports how long the condition lasted (and how many transitions a flapping sensor made), e.g. `Cleared after 10 min: Bilge high!, 2 transitions`. A periodic sweep (every 60s) runs the hysteresis; while messaging is unavailable the cleared episodes are kept and retried on the next sweep
+- A notification that is deleted outright (a `null` delta value, instead of transitioning to a normal state) now also counts as cleared, so those alerts produce a clearing message too
+
 ## [0.4.7] - 2026-08-12
 ### Changed
 - Renamed `communication.reticulum.propagationStored` to `communication.reticulum.lxmfPropagationStored` for consistency with RFed status paths (`rfedNode`/`rfedBlobsStored`). Both LXMF and RFed embedded nodes now follow the same naming pattern (`lxmfPropagationNode`/`lxmfPropagationStored`, `rfedNode`/`rfedBlobsStored`).

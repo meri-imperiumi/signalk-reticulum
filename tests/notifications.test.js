@@ -8,6 +8,7 @@ const {
   buildAlertMessage,
   effectiveCrew,
   sendNotification,
+  sweepNotifications,
 } = require("../plugin/notifications");
 const { deriveLxmfDestinationHash } = require("../plugin/identity");
 
@@ -418,5 +419,328 @@ describe("sendNotification", () => {
     );
 
     assert.equal(delivered.length, 1, "only the first alarm is delivered");
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("notification clearing (sweep)", () => {
+  const ALICE = "0123456789abcdef0123456789abcdef";
+  const BOB = "fedcba9876543210fedcba9876543210";
+  const crewSettings = {
+    messaging: { send_alerts: true },
+    crew: [
+      { name: "Alice", destination: ALICE },
+      { name: "Bob", destination: BOB },
+    ],
+  };
+  const alarm = { state: "alarm", message: "Bilge high!" };
+  const clear = { state: "nominal", message: "ok" };
+  const path = "notifications.electrical.bilge";
+  const startTime = new Date("2026-07-20T10:00:00Z");
+
+  function fakeApp() {
+    return {
+      errors: [],
+      debugs: [],
+      error(...a) {
+        this.errors.push(a.join(" "));
+      },
+      debug(...a) {
+        this.debugs.push(a.join(" "));
+      },
+    };
+  }
+
+  function fakeDeliver() {
+    const delivered = [];
+    const deliver = async (hash, title, content) => {
+      delivered.push({ hash, title, content });
+    };
+    return { deliver, delivered };
+  }
+
+  it("sends a plain text clearing message to crew after the hysteresis window", async () => {
+    const { deliver, delivered } = fakeDeliver();
+    const episodes = new Map();
+    const app = fakeApp();
+
+    assert.equal(
+      shouldWeSendNotification(path, alarm, episodes, crewSettings, startTime),
+      true,
+      "first alarm should be sent",
+    );
+    const clearTime = new Date(startTime.getTime() + 60000);
+    shouldWeSendNotification(path, clear, episodes, crewSettings, clearTime);
+
+    // Still inside the hysteresis window: no clearing message yet
+    await sweepNotifications(
+      episodes,
+      crewSettings,
+      deliver,
+      app,
+      new Date(clearTime.getTime() + DEBOUNCE_MS - 1),
+    );
+    assert.equal(delivered.length, 0, "no clearing message inside the window");
+    assert.ok(episodes.has(path), "episode is kept inside the window");
+
+    // Window expired: clearing message goes to each crew member
+    await sweepNotifications(
+      episodes,
+      crewSettings,
+      deliver,
+      app,
+      new Date(clearTime.getTime() + DEBOUNCE_MS),
+    );
+    assert.equal(
+      delivered.length,
+      2,
+      "clearing message sent to each crew member",
+    );
+    assert.deepEqual(
+      delivered.map((d) => d.content),
+      ["Cleared after 1 min: Bilge high!", "Cleared after 1 min: Bilge high!"],
+    );
+    assert.equal(delivered[0].hash, ALICE);
+    assert.equal(delivered[1].hash, BOB);
+    assert.equal(delivered[0].title, "Signal K: electrical.bilge");
+    assert.ok(
+      !delivered[0].content.includes("\u0007"),
+      "clearing message has no bell",
+    );
+    assert.ok(!episodes.has(path), "episode is removed after clearing");
+  });
+
+  it("does not send a clearing message when the alert re-triggers inside the window", async () => {
+    const { deliver, delivered } = fakeDeliver();
+    const episodes = new Map();
+    const app = fakeApp();
+
+    shouldWeSendNotification(path, alarm, episodes, crewSettings, startTime);
+    shouldWeSendNotification(
+      path,
+      clear,
+      episodes,
+      crewSettings,
+      new Date(startTime.getTime() + 60000),
+    );
+    assert.equal(
+      shouldWeSendNotification(
+        path,
+        alarm,
+        episodes,
+        crewSettings,
+        new Date(startTime.getTime() + 120000),
+      ),
+      false,
+      "re-triggered alarm should not be re-sent",
+    );
+
+    await sweepNotifications(
+      episodes,
+      crewSettings,
+      deliver,
+      app,
+      new Date(startTime.getTime() + DEBOUNCE_MS * 12),
+    );
+    assert.equal(
+      delivered.length,
+      0,
+      "no clearing message for an active alert",
+    );
+    assert.ok(episodes.has(path), "episode is kept while alert is active");
+  });
+
+  it("includes duration and transition count for flapping alerts", async () => {
+    const { deliver, delivered } = fakeDeliver();
+    const episodes = new Map();
+    const app = fakeApp();
+
+    shouldWeSendNotification(path, alarm, episodes, crewSettings, startTime);
+    shouldWeSendNotification(
+      path,
+      clear,
+      episodes,
+      crewSettings,
+      new Date(startTime.getTime() + 60000),
+    );
+    shouldWeSendNotification(
+      path,
+      alarm,
+      episodes,
+      crewSettings,
+      new Date(startTime.getTime() + 120000),
+    );
+    shouldWeSendNotification(
+      path,
+      clear,
+      episodes,
+      crewSettings,
+      new Date(startTime.getTime() + 600000),
+    );
+
+    await sweepNotifications(
+      episodes,
+      crewSettings,
+      deliver,
+      app,
+      new Date(startTime.getTime() + 600000 + DEBOUNCE_MS),
+    );
+    assert.equal(
+      delivered.length,
+      2,
+      "clearing message sent to each crew member",
+    );
+    assert.equal(
+      delivered[0].content,
+      "Cleared after 10 min: Bilge high!, 2 transitions",
+    );
+  });
+
+  it("falls back to the notification path when no message was stored", async () => {
+    const { deliver, delivered } = fakeDeliver();
+    const episodes = new Map();
+    const app = fakeApp();
+
+    shouldWeSendNotification(
+      path,
+      { state: "alarm" },
+      episodes,
+      crewSettings,
+      startTime,
+    );
+    const clearTime = new Date(startTime.getTime() + 30000);
+    shouldWeSendNotification(path, clear, episodes, crewSettings, clearTime);
+
+    await sweepNotifications(
+      episodes,
+      crewSettings,
+      deliver,
+      app,
+      new Date(clearTime.getTime() + DEBOUNCE_MS),
+    );
+    assert.equal(
+      delivered.length,
+      2,
+      "clearing message sent to each crew member",
+    );
+    assert.equal(delivered[0].content, "Cleared after 30 s: electrical.bilge");
+  });
+
+  it("treats a deleted notification as cleared", async () => {
+    const { deliver, delivered } = fakeDeliver();
+    const episodes = new Map();
+    const app = fakeApp();
+
+    shouldWeSendNotification(path, alarm, episodes, crewSettings, startTime);
+    // A notification delta may carry a null value when the notification is
+    // dismissed outright instead of transitioning to a normal state.
+    const clearTime = new Date(startTime.getTime() + 2 * 60000);
+    assert.equal(
+      shouldWeSendNotification(path, null, episodes, crewSettings, clearTime),
+      false,
+    );
+
+    await sweepNotifications(
+      episodes,
+      crewSettings,
+      deliver,
+      app,
+      new Date(clearTime.getTime() + DEBOUNCE_MS),
+    );
+    assert.equal(delivered.length, 2, "clearing message sent on deletion");
+    assert.equal(delivered[0].content, "Cleared after 2 min: Bilge high!");
+    assert.ok(!episodes.has(path), "episode is removed after clearing");
+  });
+
+  it("cleans up expired episodes without sending when alert sending is disabled", async () => {
+    const { deliver, delivered } = fakeDeliver();
+    const episodes = new Map();
+    const app = fakeApp();
+
+    shouldWeSendNotification(path, alarm, episodes, crewSettings, startTime);
+    const clearTime = new Date(startTime.getTime() + 60000);
+    shouldWeSendNotification(path, clear, episodes, crewSettings, clearTime);
+
+    await sweepNotifications(
+      episodes,
+      { messaging: { send_alerts: false } },
+      deliver,
+      app,
+      new Date(clearTime.getTime() + DEBOUNCE_MS),
+    );
+    assert.equal(delivered.length, 0, "nothing sent when alerts are disabled");
+    assert.ok(!episodes.has(path), "episode is still cleaned up");
+  });
+
+  it("cleans up expired episodes without sending when there is no crew", async () => {
+    const { deliver, delivered } = fakeDeliver();
+    const episodes = new Map();
+    const app = fakeApp();
+    const noCrewSettings = {
+      messaging: { send_alerts: true },
+      crew: [],
+    };
+
+    shouldWeSendNotification(path, alarm, episodes, noCrewSettings, startTime);
+    const clearTime = new Date(startTime.getTime() + 60000);
+    shouldWeSendNotification(path, clear, episodes, noCrewSettings, clearTime);
+
+    await sweepNotifications(
+      episodes,
+      noCrewSettings,
+      deliver,
+      app,
+      new Date(clearTime.getTime() + DEBOUNCE_MS),
+    );
+    assert.equal(delivered.length, 0, "nothing sent without crew destinations");
+    assert.ok(!episodes.has(path), "episode is still cleaned up");
+  });
+
+  it("keeps episodes for the next sweep when messaging is unavailable", async () => {
+    const episodes = new Map();
+    const app = fakeApp();
+
+    shouldWeSendNotification(path, alarm, episodes, crewSettings, startTime);
+    const clearTime = new Date(startTime.getTime() + 60000);
+    shouldWeSendNotification(path, clear, episodes, crewSettings, clearTime);
+
+    await sweepNotifications(
+      episodes,
+      crewSettings,
+      undefined,
+      app,
+      new Date(clearTime.getTime() + DEBOUNCE_MS),
+    );
+    assert.ok(
+      episodes.has(path),
+      "episode is kept for retry once messaging comes up",
+    );
+  });
+
+  it("logs per-recipient failures without aborting the remaining recipients", async () => {
+    const delivered = [];
+    const deliver = async (hash) => {
+      if (hash === ALICE) throw new Error("no path");
+      delivered.push(hash);
+    };
+    const episodes = new Map();
+    const app = fakeApp();
+
+    shouldWeSendNotification(path, alarm, episodes, crewSettings, startTime);
+    const clearTime = new Date(startTime.getTime() + 60000);
+    shouldWeSendNotification(path, clear, episodes, crewSettings, clearTime);
+
+    await sweepNotifications(
+      episodes,
+      crewSettings,
+      deliver,
+      app,
+      new Date(clearTime.getTime() + DEBOUNCE_MS),
+    );
+    assert.equal(delivered.length, 1, "remaining recipient still served");
+    assert.equal(app.errors.length, 1);
+    assert.match(app.errors[0], /Failed to send clearing message to Alice/);
+    assert.ok(!episodes.has(path), "episode is not retried after a failure");
   });
 });

@@ -24,7 +24,7 @@ const {
 const { resolveIdentity } = require("./identity");
 const { effectiveInterfaces, setupInterfaces, interfacesFromConfig } =
   require("./interfaces");
-const { sendNotification } = require("./notifications");
+const { sendNotification, sweepNotifications } = require("./notifications");
 const { setupMessaging, makeDeliverer, makeTelemetryDeliverer } =
   require("./messaging");
 const { setupNomadNet } = require("./nomadnet");
@@ -1485,6 +1485,17 @@ module.exports = (app) => {
             app.debug(`Notification subscription error: ${e.message}`);
           }
         }
+
+        // Send clearing messages for notification episodes that have
+        // stayed cleared for the hysteresis window, and clean up the
+        // episode tracker. A no-op while messaging is down: the episodes
+        // are kept and retried on the next sweep.
+        const notificationSweepTimer = setInterval(() => {
+          Promise.resolve(
+            sweepNotifications(episodes, config, alertDeliver, app),
+          ).catch((e) => app.debug(`Notification sweep error: ${e.message}`));
+        }, 60000);
+        unsubscribes.push(() => clearInterval(notificationSweepTimer));
 
         // Re-announce every destination immediately when any configured
         // connectivity indicator changes (Starlink dropping, an LTE modem
