@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const net = require("node:net");
 
 const {
   DEFAULT_INTERFACES,
@@ -9,6 +10,14 @@ const {
   optionsFromEntry,
   setupInterfaces,
 } = require("../plugin/interfaces");
+const {
+  Reticulum,
+  Packet,
+  PacketType,
+  DestType,
+  HeaderType,
+} = require("@reticulum/core");
+const { LocalClientInterface } = require("@reticulum/node");
 
 /** A fake interface class that records its lifecycle for assertions. */
 function makeFakeInterfaceClass(typeName, { connectThrows, ctorThrows } = {}) {
@@ -217,3 +226,142 @@ test("effectiveInterfaces(interfacesFromConfig(...)) defaults to AutoInterface w
     [{ type: "auto" }],
   );
 });
+
+// ---------------------------------------------------------------------------
+// Reconnect regression guard
+//
+// Real bug observed in production (the plugin's TCP client to an onboard
+// Python rnsd): a reconnecting client interface (TCP client, shared-instance
+// local client, WebSocket, WebRTC) rebuilds its whole stream pipeline on
+// reconnect and drops its cached `_packetWriter`. The transport acquired that
+// writer exactly once at addInterface time and never re-acquired it, so after
+// a single connection blip every outbound packet silently stopped — periodic
+// announces were skipped, inbound path requests could no longer be answered
+// (peers saw "no path" to the LXMF relay and other destinations), and
+// link-based telemetry sends threw "no packet writer" — while inbound traffic
+// kept flowing and the node looked healthy.
+//
+// The fix lives in @reticulum/core itself (the transport re-acquires the
+// writer on every interface `connected` event; reticulum-js work doc #33).
+// The smoketest below drives a real LocalClientInterface against a real TCP
+// server attached to a real Reticulum transport and asserts broadcasts still
+// reach the wire after a drop+reconnect. It self-skips when the installed
+// dependency predates the fix, so it activates as a release gate the moment
+// the fixed @reticulum/core is installed.
+// ---------------------------------------------------------------------------
+
+/**
+ * Probes whether the installed @reticulum/core transport re-acquires an
+ * interface's outbound stream writer when the interface reconnects (dispatches
+ * `connected` after replacing its streams) — the upstream fix this suite
+ * depends on. Purely in-process: a fake reconnecting interface attached to a
+ * real Reticulum transport, no network I/O.
+ *
+ * @returns {Promise<boolean>} `true` when the transport rebinds on reconnect.
+ */
+async function transportRebindsOnReconnect() {
+  class ProbeInterface extends EventTarget {
+    constructor() {
+      super();
+      this.name = "probe-reconnect";
+      this.bitrate = 1000000;
+      this.online = true;
+      /** @type {any} */
+      this.writable = new WritableStream();
+      /** @type {any} */
+      this._packetWriter = null;
+    }
+  }
+  const rns = new Reticulum({ logLevel: "error" });
+  try {
+    const probe = new ProbeInterface();
+    rns.addInterface(probe);
+    // Simulate a reconnect: fresh stream pipeline, stale writer dropped —
+    // exactly what the reconnecting client interfaces do in _setupStreams.
+    probe.writable = new WritableStream();
+    probe._packetWriter = null;
+    probe.dispatchEvent(new Event("connected"));
+    return Boolean(probe._packetWriter);
+  } finally {
+    await rns.stop().catch(() => {});
+  }
+}
+
+test("smoketest: broadcasts survive a shared-instance client drop+reconnect", async (t) => {
+  if (!(await transportRebindsOnReconnect())) {
+    t.skip(
+      "installed @reticulum/core does not rebind the transport writer on reconnect yet " +
+        "(reticulum-js work doc #33); update the dependency before releasing",
+    );
+    return;
+  }
+
+  /** Per-accepted-connection byte counter. */
+  const connections = [];
+  const server = net.createServer((socket) => {
+    const entry = { socket, bytes: 0 };
+    connections.push(entry);
+    socket.on("data", (d) => {
+      entry.bytes += d.length;
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+
+  const rns = new Reticulum({ logLevel: "error" });
+  const client = new LocalClientInterface({
+    port,
+    reconnectWait: 1,
+  });
+  try {
+    await client.connect();
+    rns.addInterface(client, true);
+
+    const packet = () =>
+      new Packet({
+        headerType: HeaderType.HEADER_1,
+        hops: 0,
+        transportType: 0,
+        destinationType: DestType.PLAIN,
+        packetType: PacketType.DATA,
+        contextFlag: false,
+        destinationHash: new Uint8Array(16).fill(0),
+        contextByte: 0,
+        payload: new TextEncoder().encode("reconnect smoketest"),
+      });
+
+    // Before the drop: broadcast reaches the first connection.
+    rns.transport.broadcast(packet());
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.ok(
+      connections.length >= 1,
+      "server accepted the initial connection",
+    );
+    assert.ok(
+      connections[0].bytes > 0,
+      "first broadcast reached connection #1",
+    );
+
+    // Drop the server side; the client's reconnect loop re-dials.
+    connections[0].socket.destroy();
+    const deadline = Date.now() + 15000;
+    while (connections.length < 2 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(connections.length >= 2, "client reconnected after the drop");
+
+    // After the drop: a broadcast must reach the NEW connection. Against an
+    // unfixed transport this wrote nothing anywhere (silently skipped
+    // interface, the exact production symptom).
+    rns.transport.broadcast(packet());
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.ok(
+      connections[1].bytes > 0,
+      "broadcast after reconnect reached connection #2",
+    );
+  } finally {
+    await rns.stop().catch(() => {});
+    await client.disconnect().catch(() => {});
+    await new Promise((resolve) => server.close(resolve));
+  }
+}, 30000);
