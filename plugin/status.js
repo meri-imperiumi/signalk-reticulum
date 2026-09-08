@@ -208,6 +208,7 @@ async function formatStatusValues(
   embeddedRfed,
   identity,
   displayName,
+  health,
 ) {
   const status = await getStatus(
     rns,
@@ -284,6 +285,26 @@ async function formatStatusValues(
       {
         path: `communication.reticulum.interfaces.${iface.id}.bytesTransmitted`,
         value: iface.txb,
+      },
+    );
+  }
+
+  // Host-load health from the recovery layer (event-loop lag, whether any
+  // interface's outbound path looks wedged, and how many interfaces have
+  // been recycled to recover). Absent on servers/tests that do not wire it.
+  if (health && typeof health === "object") {
+    values.push(
+      {
+        path: "communication.reticulum.eventLoopLag",
+        value: health.eventLoopLagMs ?? 0,
+      },
+      {
+        path: "communication.reticulum.outboundStalled",
+        value: health.outboundStalled === true,
+      },
+      {
+        path: "communication.reticulum.interfaceRecycles",
+        value: health.interfaceRecycles ?? 0,
       },
     );
   }
@@ -454,6 +475,36 @@ function getStatusMetadata() {
         displayName: "RFed channel subscriptions",
         description:
           "Number of channel subscriptions in the embedded RFed federation node",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.eventLoopLag",
+      value: {
+        displayName: "Event loop lag",
+        description:
+          "Latest Signal K server event-loop lag sample (timer drift), ms — " +
+          "large values mean the host/process is overloaded, which can stall " +
+          "the plugin's outbound traffic",
+        units: "ms",
+      },
+    },
+    {
+      path: "communication.reticulum.outboundStalled",
+      value: {
+        displayName: "Outbound traffic stalled",
+        description:
+          "True when a connected interface has stopped transmitting while " +
+          "online and recovery is under way",
+      },
+    },
+    {
+      path: "communication.reticulum.interfaceRecycles",
+      value: {
+        displayName: "Interface recycles",
+        description:
+          "Interfaces rebuilt this run to recover a wedged transmit path " +
+          "(the in-process equivalent of a server restart)",
         units: "count",
       },
     },

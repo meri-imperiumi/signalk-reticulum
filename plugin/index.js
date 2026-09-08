@@ -74,6 +74,12 @@ const {
 } = require("./discovery");
 const commands = require("./commands");
 const { formatStatusValues, getStatusMetadata } = require("./status");
+const { watchAnnounceFreshness } = require("./announce-health");
+const {
+  withTimeout,
+  startLagMonitor,
+  watchOutboundFreeze,
+} = require("./recovery");
 
 /**
  * Overridable dependencies (the Reticulum orchestrator class, the interface
@@ -89,6 +95,10 @@ const deps = {
   setupCrewPersistence,
   setupPropagationNodePersistence,
   discoverClosestNode,
+  watchAnnounceFreshness,
+  withTimeout,
+  startLagMonitor,
+  watchOutboundFreeze,
 };
 
 /**
@@ -529,10 +539,35 @@ module.exports = (app) => {
         // Optionally reuse a locally running shared Reticulum instance (rnsd)
         // and its mesh interfaces. Enabled by default: when no shared instance
         // is reachable we transparently fall back to the configured interfaces.
+        // Each interface is also registered with a rebuild factory so the
+        // outbound-freeze watchdog (below) can recycle a wedged connection
+        // without a server restart.
         const useSharedInstance = !(
           config && config.use_shared_instance === false
         );
         let usedSharedInstance = false;
+        /** @type {{iface: object, label: string, buildReplacement: (old:object)=>Promise<object|null>}[]} */
+        const recoveryInterfaces = [];
+        const makeSharedReplacement = (rnsNode, connect) => {
+          return async (oldIface) => {
+            try {
+              rnsNode.removeInterface(oldIface);
+            } catch {
+              /* already detached */
+            }
+            try {
+              await oldIface.disconnect();
+            } catch {
+              /* best effort */
+            }
+            const shared = await connect({});
+            if (shared) {
+              rnsNode.addInterface(shared, true);
+              return shared;
+            }
+            return null;
+          };
+        };
         if (useSharedInstance) {
           try {
             const shared = await deps.connectSharedInstance({});
@@ -540,6 +575,14 @@ module.exports = (app) => {
               rns.addInterface(shared, true);
               plugin.interfaces = [shared];
               usedSharedInstance = true;
+              recoveryInterfaces.push({
+                iface: shared,
+                label: "shared-instance",
+                buildReplacement: makeSharedReplacement(
+                  rns,
+                  deps.connectSharedInstance,
+                ),
+              });
               app.debug("Connected to shared Reticulum instance");
             } else {
               app.debug("No shared Reticulum instance available");
@@ -565,14 +608,46 @@ module.exports = (app) => {
               "No interfaces configured; starting default AutoInterface",
             );
           }
-          const result = await setupInterfaces(
-            rns,
-            list,
-            deps.getInterface,
-            app.debug,
-          );
-          plugin.interfaces = result.connected;
-          setupErrors = result.errors;
+          // Set up one configured interface at a time so each keeps a
+          // matching rebuild factory for the freeze watchdog.
+          const connected = [];
+          for (const entry of list) {
+            const result = await setupInterfaces(
+              rns,
+              [entry],
+              deps.getInterface,
+              app.debug,
+            );
+            setupErrors = setupErrors.concat(result.errors);
+            const iface = result.connected[0];
+            if (iface) {
+              connected.push(iface);
+              recoveryInterfaces.push({
+                iface,
+                label: `${entry.type}`,
+                buildReplacement: async (oldIface) => {
+                  try {
+                    rns.removeInterface(oldIface);
+                  } catch {
+                    /* already detached */
+                  }
+                  try {
+                    await oldIface.disconnect();
+                  } catch {
+                    /* best effort */
+                  }
+                  const rebuilt = await setupInterfaces(
+                    rns,
+                    [entry],
+                    deps.getInterface,
+                    () => {},
+                  );
+                  return rebuilt.connected[0] ?? null;
+                },
+              });
+            }
+          }
+          plugin.interfaces = connected;
         }
 
         // Resolve the periodic re-announce cadence so both the LXMF and
@@ -604,6 +679,8 @@ module.exports = (app) => {
         let alertDeliver;
         /** Telemetry delivery callback (set when messaging comes up). */
         let deliverTelemetry;
+        /** Timeout-bounded wrapper around {@link deliverTelemetry}. */
+        let timedDeliverTelemetry;
         /**
          * Display name the LXMF delivery destination announces as. Captured
          * here so the connectivity-change trigger can re-announce with the
@@ -657,6 +734,16 @@ module.exports = (app) => {
             appearance,
           );
 
+          // A hung stream write (socket backpressure on a busy host) must
+          // never wedge the telemetry loop: bound every crew delivery so a
+          // stuck send is logged as a failure and the next tick starts fresh.
+          timedDeliverTelemetry = (destinationHashHex, packed) =>
+            deps.withTimeout(
+              () => deliverTelemetry(destinationHashHex, packed),
+              120_000,
+              "telemetry delivery",
+            );
+
           // Handle incoming LXMF messages (ping/pong, and future commands)
           // from any peer on the mesh.
           const onLxmfMessage = async (event) => {
@@ -685,7 +772,12 @@ module.exports = (app) => {
               await commands.handleMessage(
                 message,
                 config,
-                deliver,
+                (dest, title, content, linkId) =>
+                  deps.withTimeout(
+                    () => deliver(dest, title, content, linkId),
+                    120_000,
+                    "LXMF delivery",
+                  ),
                 app,
                 linkId,
               );
@@ -943,6 +1035,17 @@ module.exports = (app) => {
           }
         }
 
+        // Host-load health, kept live by the recovery layer below and
+        // surfaced through the periodic status publish.
+        const pluginHealth = {
+          /** Latest event-loop lag sample, ms (0 until the first sample). */
+          eventLoopLagMs: 0,
+          /** Completed interface recycles this run. */
+          interfaceRecycles: 0,
+          /** Whether any monitored interface is currently stalled/probing. */
+          outboundStalled: false,
+        };
+
         // Publish Reticulum status metadata on startup.
         const statusMetadata = getStatusMetadata();
         app.handleMessage("signalk-reticulum", {
@@ -959,6 +1062,9 @@ module.exports = (app) => {
         const statusIntervalMs = 60000;
         const publishStatus = async () => {
           try {
+            if (typeof pluginHealth.updateFromWatchdog === "function") {
+              pluginHealth.updateFromWatchdog();
+            }
             app.debug(
               `publishStatus: embeddedPropagation=${!!plugin.embeddedPropagation}, embeddedRfed=${!!plugin.embeddedRfed}`,
             );
@@ -971,6 +1077,7 @@ module.exports = (app) => {
               plugin.embeddedRfed,
               plugin.identity,
               displayName,
+              pluginHealth,
             );
             app.handleMessage("signalk-reticulum", {
               context: "vessels.self",
@@ -1203,7 +1310,7 @@ module.exports = (app) => {
           const intervalMs =
             Math.max(30, Number(config.telemetry.interval_seconds) || 0) * 1000;
           const sendOnce = () =>
-            sendTelemetryToCrew(app, config, deliverTelemetry).catch((e) =>
+            sendTelemetryToCrew(app, config, timedDeliverTelemetry).catch((e) =>
               app.debug(`Telemetry broadcast error: ${e.message}`),
             );
           // Send one snapshot shortly after start so crew see the boat
@@ -1214,6 +1321,29 @@ module.exports = (app) => {
             clearTimeout(initial);
             clearInterval(timer);
           });
+        }
+
+        // Keep crew delivery alive without restarts: outbound LXMF is
+        // encrypted to each crew member's *current* ratchet key, learned
+        // only from their announces. When announce refreshes stop reaching
+        // us (a multi-hop topology can do this for hours), we keep encrypting
+        // to a stale ratchet and the peer silently drops everything — and the
+        // transport never re-solicits while a (stale) path exists, so only a
+        // restart recovered it. The watchdog re-requests a fresh path (the
+        // path-response refreshes route, identity and ratchet) for any crew
+        // destination whose announces have gone stale. Runs whenever LXMF
+        // messaging is up — it protects telemetry, alert delivery and command
+        // replies alike, not just the telemetry loop.
+        if (deliverTelemetry) {
+          unsubscribes.push(
+            deps.watchAnnounceFreshness({
+              rns,
+              destinationHashes: effectiveCrew(config && config.crew).map(
+                (member) => member.destinationHash,
+              ),
+              log: (msg) => app.debug(msg),
+            }),
+          );
         }
 
         // Optionally bring up an RFed (Reticulum Federation) channel client
@@ -1567,6 +1697,104 @@ module.exports = (app) => {
           } catch (e) {
             app.debug(`Connectivity subscription error: ${e.message}`);
           }
+        }
+
+        // --- Host-load recovery --------------------------------------------
+        // The plugin runs inside a busy Signal K server process, often on
+        // the same box as the rnsd it talks to. Under load, an interface's
+        // outbound stream can wedge in ways the mesh cannot see (a
+        // backpressured socket hangs every awaited send; broadcast writes
+        // queue silently; the node still looks online). The watchdog below
+        // watches each interface's transmit counter: when an online
+        // interface sends nothing for a window that must have contained
+        // outbound attempts, it first re-announces (recovers timer/announce-
+        // loop stalls without disruption) and, if the counter still does
+        // not move, recycles the interface — the in-process equivalent of
+        // the "restart the server" fix. Only armed when there is periodic
+        // outbound traffic to detect a freeze against.
+        const telemetryEnabled = !!(
+          config &&
+          config.telemetry &&
+          config.telemetry.enabled &&
+          deliverTelemetry
+        );
+        const hasPeriodicOutbound = !!announceIntervalMs || telemetryEnabled;
+        if (recoveryInterfaces.length && hasPeriodicOutbound) {
+          const probeAndRearmAnnounces = async () => {
+            // The LXMF announce loop stopping entirely is one freeze cause;
+            // re-arm it before the probe announce so both are recovered.
+            const lxmfRouter = plugin.lxmf;
+            if (
+              lxmfRouter &&
+              lxmfRouter.deliveryDest &&
+              announceIntervalMs &&
+              typeof lxmfRouter.deliveryDest.isAnnouncing === "function" &&
+              !lxmfRouter.deliveryDest.isAnnouncing()
+            ) {
+              app.debug("LXMF announce loop stopped; re-arming");
+              try {
+                await lxmfRouter.startAnnouncing(displayName, {
+                  intervalMs: announceIntervalMs,
+                });
+              } catch (e) {
+                app.debug(`Re-arming LXMF announcing failed: ${e.message}`);
+              }
+            }
+            await triggerAnnounce(
+              {
+                lxmf: plugin.lxmf,
+                displayName,
+                nomadnet: plugin.nomadnet,
+                rfed: plugin.rfed,
+                embeddedRfed: plugin.embeddedRfed,
+                propagationLxmf: plugin.embeddedPropagation
+                  ? plugin.lxmf
+                  : undefined,
+              },
+              app.debug,
+            );
+          };
+          const freezeWatchdog = deps.watchOutboundFreeze({
+            interfaces: recoveryInterfaces,
+            probeAnnounce: probeAndRearmAnnounces,
+            // The stall window must comfortably exceed the longest gap
+            // between legitimate outbound attempts (announce interval,
+            // telemetry interval).
+            stallAfterMs: announceIntervalMs
+              ? Math.max(announceIntervalMs, 45 * 60 * 1000)
+              : 45 * 60 * 1000,
+            log: (msg) => app.debug(msg),
+            onSwapped: (label, oldIface, fresh) => {
+              pluginHealth.interfaceRecycles += 1;
+              const idx = plugin.interfaces.indexOf(oldIface);
+              if (fresh && idx >= 0) {
+                plugin.interfaces[idx] = fresh;
+              }
+              app.error(
+                `Reticulum interface "${label}" was wedged (no outbound ` +
+                  "traffic); it has been recycled to recover delivery",
+              );
+            },
+          });
+          unsubscribes.push(() => freezeWatchdog.stop());
+
+          // Event-loop lag sampling: a busy Signal K server delays the
+          // plugin's timers, which is context for interpreting freezes.
+          const stopLagMonitor = deps.startLagMonitor({
+            onSample: (lagMs) => {
+              pluginHealth.eventLoopLagMs = lagMs;
+            },
+          });
+          unsubscribes.push(stopLagMonitor);
+
+          // Surface the freeze state on the periodic status publish.
+          const snapshot = freezeWatchdog.snapshot;
+          pluginHealth.updateFromWatchdog = () => {
+            const snap = snapshot();
+            pluginHealth.outboundStalled = Object.values(snap).some(
+              (s) => s && s.phase !== "ok",
+            );
+          };
         }
 
         const connectivity = usedSharedInstance
