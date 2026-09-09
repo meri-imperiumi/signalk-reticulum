@@ -162,23 +162,34 @@ function makePropagationDeliverer(lxmf, identity, debug = () => {}) {
 }
 
 /**
- * Builds a `deliver` callback that prefers direct delivery and only falls back
- * to the propagation node when the recipient can't be reached right now — i.e.
- * no path to their `lxmf.delivery` destination is known (`transport.hasPath`
- * returns false), mirroring Sideband's auto outbox mode.
+ * Builds a `deliver` callback that prefers direct delivery and falls back
+ * to the propagation node when the recipient can't be reached — mirroring
+ * Sideband's auto outbox mode, with two triggers:
+ *
+ *  - **No known path** to their `lxmf.delivery` destination
+ *    (`transport.hasPath` returns false), or
+ *  - **direct delivery failed** — the direct deliverer threw (no identity,
+ *    link failure, or — with a proof-aware transport — no delivery proof
+ *    arrived before the proof-wait timeout, meaning the mesh silently
+ *    dropped the packet).
  *
  * When the recipient *is* reachable the direct deliverer runs (it itself does
- * link-then-opportunistic); when no path is known the message is submitted to
- * the propagation node so it is stored until the recipient next syncs. When no
- * path check is available (the transport lacks `hasPath`) direct delivery is
- * always used, preserving the pre-propagation behaviour.
+ * link-then-opportunistic); on either fallback trigger the message is
+ * submitted to the propagation node so it is stored until the recipient next
+ * syncs. When no path check is available (the transport lacks `hasPath`)
+ * direct delivery is always tried first, preserving the pre-propagation
+ * behaviour.
+ *
+ * Note the fallback can duplicate a message when the direct packet was
+ * actually delivered but its proof was lost in transit — the same trade
+ * Python LXMF's auto outbox mode makes; clients deduplicate by message hash.
  *
  * @param {object} options
  * @param {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null)=>Promise<void>} options.directDeliver
  * @param {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null)=>Promise<void>} options.propagationDeliver
  * @param {(destinationHash:Uint8Array)=>boolean} [options.hasPath]
  *   `rns.transport.hasPath` (or equivalent); when omitted the recipient is
- *   always assumed reachable so direct delivery is used.
+ *   always assumed reachable so direct delivery is tried first.
  * @param {(hex:string)=>Uint8Array} [options.fromHex]
  * @param {(...args:any[])=>void} [options.debug]
  * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null)=>Promise<void>}
@@ -199,7 +210,20 @@ function makeAutoDeliverer({
     const canCheck = typeof hasPath === "function";
     const reachable = !canCheck || hasPath(fromHex(destinationHashHex));
     if (reachable) {
-      return directDeliver(destinationHashHex, title, content, linkId);
+      try {
+        return await directDeliver(destinationHashHex, title, content, linkId);
+      } catch (e) {
+        debug(
+          `Direct delivery to ${destinationHashHex} failed (${e.message}); ` +
+            "falling back to store-and-forward via the propagation node",
+        );
+        return await propagationDeliver(
+          destinationHashHex,
+          title,
+          content,
+          linkId,
+        );
+      }
     }
     debug(
       `No path to ${destinationHashHex}; falling back to store-and-forward via the propagation node`,

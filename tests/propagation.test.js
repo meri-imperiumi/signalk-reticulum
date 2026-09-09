@@ -330,6 +330,59 @@ test("makeAutoDeliverer always uses direct delivery when no path check is given"
   assert.equal(propagation.calls.length, 0, "no fallback without a path check");
 });
 
+test("makeAutoDeliverer falls back to propagation when direct delivery fails", async () => {
+  const propagation = recordingDeliverer();
+  const failures = [
+    new Error("no delivery proof was received from the recipient"),
+    new Error("Link dead is not available"),
+  ];
+  let attempt = 0;
+  const direct = async (destinationHashHex, title, content, linkId) => {
+    throw failures[Math.min(attempt++, failures.length - 1)];
+  };
+  const logs = [];
+  const deliver = makeAutoDeliverer({
+    directDeliver: direct,
+    propagationDeliver: propagation,
+    hasPath: () => true, // path known — the failure must still trigger fallback
+    fromHex: (hex) => Buffer.from(hex, "hex"),
+    debug: (msg) => logs.push(msg),
+  });
+
+  await deliver("0123456789abcdef0123456789abcdef", "", "Pong");
+  await deliver("fedcba9876543210fedcba9876543210", "Bilge", "High!");
+
+  assert.equal(propagation.calls.length, 2, "each failed direct send stored");
+  assert.deepEqual(
+    propagation.calls.map((c) => c.content),
+    ["Pong", "High!"],
+  );
+  assert.ok(
+    logs.every((l) => /Direct delivery.*failed.*falling back/.test(l)),
+    `fallback-on-failure logged: ${logs.join(" | ")}`,
+  );
+});
+
+test("makeAutoDeliverer propagates the failure when the propagation fallback also fails", async () => {
+  const direct = async () => {
+    throw new Error("direct failed");
+  };
+  const propagation = async () => {
+    throw new Error("propagation node unreachable");
+  };
+  const deliver = makeAutoDeliverer({
+    directDeliver: direct,
+    propagationDeliver: propagation,
+    hasPath: () => true,
+    fromHex: (hex) => Buffer.from(hex, "hex"),
+  });
+
+  await assert.rejects(
+    () => deliver("0123456789abcdef0123456789abcdef", "", "x"),
+    /propagation node unreachable/,
+  );
+});
+
 // --- embedded propagation node (real in-process LXMRouter) -----------------
 //
 // When the plugin runs its own propagation node, the node and its client

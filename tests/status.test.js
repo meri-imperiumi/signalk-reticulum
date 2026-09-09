@@ -371,3 +371,86 @@ test("per-interface ids are unique when names collide after sanitization", async
     "Lille.Oe",
   ]);
 });
+
+// --- lxmfPropagationNode: embedded vs external (client) node ----------------
+
+test("lxmfPropagationNode reports the external client node when no embedded node runs", async () => {
+  const externalHex = "0123456789abcdef0123456789abcdef";
+  const values = await formatStatusValues(
+    null,
+    null, // no lxmf router -> no embedded propagation node
+    null,
+    null,
+    null,
+    null,
+    null,
+    "",
+    {},
+    externalHex,
+  );
+
+  const node = values.find(
+    (v) => v.path === "communication.reticulum.lxmfPropagationNode",
+  );
+  assert.ok(node, "lxmfPropagationNode path emitted");
+  assert.equal(node.value, externalHex, "the chosen client node is reported");
+});
+
+test("lxmfPropagationNode stays null when no propagation node is in use", async () => {
+  const values = await formatStatusValues(
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    "",
+    {},
+  );
+
+  const node = values.find(
+    (v) => v.path === "communication.reticulum.lxmfPropagationNode",
+  );
+  assert.ok(node);
+  assert.equal(node.value, null, "null until a node is embedded or chosen");
+});
+
+test("lxmfPropagationNode prefers the embedded node over the client value", async () => {
+  const embeddedHex = "fedcba9876543210fedcba9876543210";
+  const clientHex = "0123456789abcdef0123456789abcdef";
+  const fakeLxmf = {
+    propagationNode: { store: { size: 2 } },
+    propagationDest: {
+      destinationHash: Buffer.from(embeddedHex, "hex"),
+    },
+  };
+
+  const values = await formatStatusValues(
+    null,
+    fakeLxmf,
+    null,
+    null,
+    { irrelevant: true },
+    null,
+    null,
+    "",
+    {},
+    clientHex,
+  );
+
+  const node = values.find(
+    (v) => v.path === "communication.reticulum.lxmfPropagationNode",
+  );
+  assert.equal(
+    node.value,
+    embeddedHex,
+    "the embedded node wins when one is running",
+  );
+
+  // The embedded-node counters keep working alongside.
+  const stored = values.find(
+    (v) => v.path === "communication.reticulum.lxmfPropagationStored",
+  );
+  assert.equal(stored.value, 2);
+});

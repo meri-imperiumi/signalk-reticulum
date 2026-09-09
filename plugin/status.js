@@ -69,6 +69,10 @@ function getInterfaceStats(iface) {
  * @param {object} [_embeddedRfed] - Optional embedded RFed federation node
  * @param {object} [identity] - Optional Reticulum identity instance
  * @param {string} [displayName] - Optional display name
+ * @param {string|null} [clientPropagationNode] - Destination hash of the
+ *   configured or auto-discovered *external* LXMF propagation node this
+ *   plugin uses as a store-and-forward client (null when none/unknown);
+ *   only surfaced when no embedded propagation node is running
  * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
  */
 async function getStatus(
@@ -80,6 +84,7 @@ async function getStatus(
   _embeddedRfed,
   identity,
   displayName,
+  clientPropagationNode = null,
 ) {
   const interfaces = [];
   let interfacesConnected = 0;
@@ -176,7 +181,7 @@ async function getStatus(
     interfacesConnected,
     bytesReceived,
     bytesTransmitted,
-    lxmfPropagationNode: propagationNodeHash,
+    lxmfPropagationNode: propagationNodeHash ?? clientPropagationNode ?? null,
     rfedNode: rfedNodeHash,
     embeddedPropagationRunning,
     lxmfPropagationStored,
@@ -197,6 +202,10 @@ async function getStatus(
  * @param {object} [embeddedRfed] - Optional embedded RFed federation node
  * @param {object} [identity] - Optional Reticulum identity instance
  * @param {string} [displayName] - Optional display name
+ * @param {object} [health] - Plugin health snapshot (event-loop lag, recycles)
+ * @param {string|null} [clientPropagationNode] - Destination hash of the
+ *   configured or auto-discovered *external* LXMF propagation node in use
+ *   (null when none/unknown); surfaced when no embedded node is running
  * @returns {Promise<{path: string, value: any}[]>}
  */
 async function formatStatusValues(
@@ -209,6 +218,7 @@ async function formatStatusValues(
   identity,
   displayName,
   health,
+  clientPropagationNode = null,
 ) {
   const status = await getStatus(
     rns,
@@ -219,6 +229,7 @@ async function formatStatusValues(
     embeddedRfed,
     identity,
     displayName,
+    clientPropagationNode,
   );
   const values = [
     {
@@ -418,7 +429,7 @@ function getStatusMetadata() {
       value: {
         displayName: "LXMF propagation node",
         description:
-          "If running an embedded LXMF propagation node, the 32-character destination hash of the node. Otherwise null when not running an embedded propagation node.",
+          "The 32-character destination hash of the LXMF propagation node in use: the plugin's own embedded node when one is running, otherwise the configured or auto-discovered external node used for store-and-forward. Null when no propagation node is in use.",
         type: "string",
         pattern: "^[0-9a-f]{32}$",
       },

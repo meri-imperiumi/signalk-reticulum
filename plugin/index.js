@@ -672,13 +672,28 @@ module.exports = (app) => {
         // messaging (deliver stays undefined and alerts are skipped).
         let deliver;
         /**
-         * Alert delivery callback. Defaults to the direct (opportunistic/link)
-         * deliverer, but is wrapped in a direct-first / propagation-fallback
-         * deliverer when an LXMF propagation node is configured.
+         * Outbound LXMF delivery callback for *conversational* traffic —
+         * command replies and notification forwards alike. Defaults to the
+         * direct (opportunistic/link) deliverer, but is wrapped in a
+         * direct-first / propagation-fallback deliverer when an LXMF
+         * propagation node is configured, so a reply to an unreachable peer
+         * is stored for them instead of silently dropped. Late-bound: the
+         * propagation wiring below may re-assign it after this handler is
+         * already registered.
          */
-        let alertDeliver;
+        let deliverOutbound;
         /** Telemetry delivery callback (set when messaging comes up). */
         let deliverTelemetry;
+        /**
+         * Destination hash of the LXMF propagation node currently in use as
+         * a store-and-forward *client* — the configured node, or the one
+         * auto-discovered from its announce. Null until one is wired (or when
+         * the embedded node is used instead, in which case the status layer
+         * derives the hash from the router). Surfaced periodically as the
+         * `communication.reticulum.lxmfPropagationNode` delta so an operator
+         * can see which node messages are being stored at.
+         */
+        let propagationNodeHex = null;
         /** Timeout-bounded wrapper around {@link deliverTelemetry}. */
         let timedDeliverTelemetry;
         /**
@@ -714,6 +729,10 @@ module.exports = (app) => {
             }
           });
           deliver = makeDeliverer(plugin.lxmf, plugin.identity, app.debug);
+          // Bind the outbound deliverer to the direct path immediately, so
+          // replies arriving during the rest of start() (before any
+          // propagation wiring below may wrap it) are never left undefined.
+          deliverOutbound = deliver;
           // Resolve the node's icon/colors once at startup (the vessel's AIS
           // ship type rarely changes) so every telemetry broadcast advertises
           // the same recognisable avatar to crew members' devices.
@@ -772,9 +791,12 @@ module.exports = (app) => {
               await commands.handleMessage(
                 message,
                 config,
+                // Replies ride the outbound deliverer so an unreachable peer
+                // gets the reply via the propagation node (store-and-forward)
+                // instead of losing it — same policy as notification alerts.
                 (dest, title, content, linkId) =>
                   deps.withTimeout(
-                    () => deliver(dest, title, content, linkId),
+                    () => deliverOutbound(dest, title, content, linkId),
                     120_000,
                     "LXMF delivery",
                   ),
@@ -1078,6 +1100,7 @@ module.exports = (app) => {
               plugin.identity,
               displayName,
               pluginHealth,
+              propagationNodeHex,
             );
             app.handleMessage("signalk-reticulum", {
               context: "vessels.self",
@@ -1111,17 +1134,11 @@ module.exports = (app) => {
         // directly (sending). When an embedded propagation node is running,
         // we skip this section entirely and use the embedded node instead.
         //
-        // Alerts default to the direct deliverer above; when a propagation
-        // node is configured (or auto-discovered) the direct deliverer is
-        // wrapped so a recipient with no known path is reached via
+        // The outbound deliverer starts as the direct deliverer bound in the
+        // messaging setup above; when a propagation node is configured (or
+        // auto-discovered) it is wrapped below so a recipient with no known
+        // path — or one whose direct delivery fails — is reached via
         // store-and-forward instead.
-        //
-        // The node hash may be configured explicitly, or — when left empty —
-        // auto-discovered as the closest lxmf.propagation announce heard on
-        // the mesh shortly after start. Either way the same `bringUp`
-        // closure wires up persistence, the periodic sync, and the
-        // direct-first / propagation-fallback deliverer.
-        alertDeliver = deliver;
 
         // When an embedded propagation node is running and propagation is
         // enabled, wire an in-process store-and-forward fallback. The
@@ -1144,7 +1161,7 @@ module.exports = (app) => {
             plugin.identity,
             app.debug,
           );
-          alertDeliver = makeAutoDeliverer({
+          deliverOutbound = makeAutoDeliverer({
             directDeliver: deliver,
             propagationDeliver,
             hasPath:
@@ -1221,6 +1238,8 @@ module.exports = (app) => {
             if (!configured) {
               return;
             }
+            // Surface the node in use on the periodic status publish.
+            propagationNodeHex = nodeHex;
             if (propagationWired) {
               app.debug(`Switched LXMF propagation node to ${nodeHex}`);
               return;
@@ -1260,7 +1279,7 @@ module.exports = (app) => {
               plugin.identity,
               app.debug,
             );
-            alertDeliver = makeAutoDeliverer({
+            deliverOutbound = makeAutoDeliverer({
               directDeliver: deliver,
               propagationDeliver,
               hasPath:
@@ -1601,7 +1620,7 @@ module.exports = (app) => {
                         v.value,
                         episodes,
                         config,
-                        alertDeliver,
+                        deliverOutbound,
                         app,
                       ),
                     ).catch((e) =>
@@ -1622,7 +1641,7 @@ module.exports = (app) => {
         // are kept and retried on the next sweep.
         const notificationSweepTimer = setInterval(() => {
           Promise.resolve(
-            sweepNotifications(episodes, config, alertDeliver, app),
+            sweepNotifications(episodes, config, deliverOutbound, app),
           ).catch((e) => app.debug(`Notification sweep error: ${e.message}`));
         }, 60000);
         unsubscribes.push(() => clearInterval(notificationSweepTimer));
