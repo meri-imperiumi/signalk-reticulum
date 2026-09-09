@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.5.2] - 2026-09-09
 ### Added
 - The chosen LXMF propagation node is now visible as a Signal K delta: `communication.reticulum.lxmfPropagationNode` reports the plugin's own embedded node's hash when one is running, and otherwise the *external* node actually in use — the configured hash, or the one auto-discovered from the mesh — instead of only ever showing the embedded node (null before). With `embeddedPropagationRunning` alongside, an operator can now see exactly which node replies and alerts are being stored at when a peer is unreachable. Covered by status tests for the external, none, and embedded-wins cases
 
