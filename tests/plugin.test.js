@@ -773,22 +773,17 @@ test("the default connectivity paths (Starlink and LTE) re-announce both destina
     nomadnet: { enabled: true },
   });
 
-  // One connectivity subscription watches both default paths.
+  // One connectivity subscription watches the default path.
   const connSub = app.subscriptionmanager.subscriptions.find(
     (s) =>
       s.context === "vessels.self" &&
-      s.subscribe.some(
-        (sub) => sub.path === "network.providers.starlink.status",
-      ),
+      s.subscribe.some((sub) => sub.path === "network.internet.state"),
   );
   assert.ok(connSub, "subscribed to the default connectivity paths");
   assert.deepEqual(
     connSub.subscribe.map((s) => s.path),
-    [
-      "network.providers.starlink.status",
-      "networking.lte.registerNetworkDisplay",
-    ],
-    "both default providers are watched in a single subscription",
+    ["network.internet.state"],
+    "the unified internet state is watched in a single subscription",
   );
 
   const lxmf = plugin.lxmf;
@@ -801,9 +796,7 @@ test("the default connectivity paths (Starlink and LTE) re-announce both destina
   app._onDelta({
     updates: [
       {
-        values: [
-          { path: "network.providers.starlink.status", value: "online" },
-        ],
+        values: [{ path: "network.internet.state", value: "online" }],
       },
     ],
   });
@@ -829,9 +822,7 @@ test("a repeating connectivity value does not re-announce again", async () => {
   app._onDelta({
     updates: [
       {
-        values: [
-          { path: "network.providers.starlink.status", value: "online" },
-        ],
+        values: [{ path: "network.internet.state", value: "online" }],
       },
     ],
   });
@@ -842,9 +833,7 @@ test("a repeating connectivity value does not re-announce again", async () => {
   app._onDelta({
     updates: [
       {
-        values: [
-          { path: "network.providers.starlink.status", value: "online" },
-        ],
+        values: [{ path: "network.internet.state", value: "online" }],
       },
     ],
   });
@@ -855,9 +844,7 @@ test("a repeating connectivity value does not re-announce again", async () => {
   app._onDelta({
     updates: [
       {
-        values: [
-          { path: "network.providers.starlink.status", value: "offline" },
-        ],
+        values: [{ path: "network.internet.state", value: "offline" }],
       },
     ],
   });
@@ -894,9 +881,7 @@ test("configured connectivity paths replace the default and any of them fires", 
   );
   assert.ok(
     !subs.some((s) =>
-      s.subscribe.some(
-        (sub) => sub.path === "network.providers.starlink.status",
-      ),
+      s.subscribe.some((sub) => sub.path === "network.internet.state"),
     ),
     "the default paths are not watched when paths are configured",
   );
@@ -930,9 +915,7 @@ test("an empty connectivity_paths list disables the trigger subscription", async
   const subs = app.subscriptionmanager.subscriptions;
   assert.ok(
     !subs.some((s) =>
-      s.subscribe.some(
-        (sub) => sub.path === "network.providers.starlink.status",
-      ),
+      s.subscribe.some((sub) => sub.path === "network.internet.state"),
     ),
     "no connectivity subscription is set up",
   );
@@ -975,9 +958,7 @@ test("a connectivity change re-announces the rfed.delivery destination", async (
     app._onDelta({
       updates: [
         {
-          values: [
-            { path: "network.providers.starlink.status", value: "online" },
-          ],
+          values: [{ path: "network.internet.state", value: "online" }],
         },
       ],
     });
@@ -1034,9 +1015,7 @@ test("a connectivity change re-announces the embedded rfed federation node", asy
     app._onDelta({
       updates: [
         {
-          values: [
-            { path: "network.providers.starlink.status", value: "online" },
-          ],
+          values: [{ path: "network.internet.state", value: "online" }],
         },
       ],
     });
@@ -1079,9 +1058,7 @@ test("a connectivity change re-announces the embedded lxmf.propagation destinati
   app._onDelta({
     updates: [
       {
-        values: [
-          { path: "network.providers.starlink.status", value: "online" },
-        ],
+        values: [{ path: "network.internet.state", value: "online" }],
       },
     ],
   });
@@ -2666,3 +2643,68 @@ test(
     }
   }),
 );
+
+// --- reconnect re-announce ---------------------------------------------------
+
+/** Polls `fn` until truthy, rejecting after `timeoutMs` (async announce paths). */
+async function waitForCondition(fn, label, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fn()) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error(`timed out waiting for: ${label}`);
+}
+
+/** An EventTarget-shaped shared-instance interface that can reconnect. */
+class FakeSharedIface extends EventTarget {
+  constructor() {
+    super();
+    this.name = "shared-instance";
+  }
+  async disconnect() {}
+}
+
+test("a reconnecting shared instance triggers an immediate re-announce of every destination", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  const shared = new FakeSharedIface();
+
+  const realConnect = makePlugin.deps.connectSharedInstance;
+  makePlugin.deps.connectSharedInstance = async () => shared;
+  try {
+    await plugin.start({ messaging: { display_name: "My Boat" } });
+    const lxmf = plugin.lxmf;
+    assert.ok(lxmf instanceof FakeLxmRouter, "LXMF router created");
+    // The periodic loop is a fake; no announces have fired yet.
+    assert.equal(lxmf.announceCalls.length, 0);
+
+    // The shared-instance connection drops and comes back (rnsd restart,
+    // host reboot, ...). The reconnect must re-announce at once so the
+    // daemon re-learns our destinations instead of dropping peers' traffic
+    // for us until the next periodic announce.
+    shared.dispatchEvent(new CustomEvent("connected"));
+    await waitForCondition(
+      () => lxmf.announceCalls.length === 1,
+      "reconnect re-announce fired",
+    );
+    assert.equal(lxmf.announceCalls[0], "My Boat");
+
+    // A burst of reconnects is debounced, not stormed.
+    shared.dispatchEvent(new CustomEvent("connected"));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(
+      lxmf.announceCalls.length,
+      1,
+      "reconnects inside the debounce window do not re-announce",
+    );
+
+    // After stop, the watcher is detached.
+    await plugin.stop();
+    shared.dispatchEvent(new CustomEvent("connected"));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(lxmf.announceCalls.length, 1, "no re-announce after stop");
+  } finally {
+    makePlugin.deps.connectSharedInstance = realConnect;
+  }
+});

@@ -37,7 +37,7 @@ const {
   setupCrewPersistence,
   setupPropagationNodePersistence,
 } = require("./storage");
-const { triggerAnnounce } = require("./announce");
+const { triggerAnnounce, watchReconnects } = require("./announce");
 const {
   normalizeNodeHash,
   configurePropagationNode,
@@ -333,12 +333,13 @@ async function sendTelemetryToCrew(app, settings, deliverTelemetry) {
  * even on boats without that particular connectivity source.
  */
 const DEFAULT_CONNECTIVITY_PATHS = [
-  // Starlink provider status (e.g. "online"/"offline"), supplied by the
-  // signalk-starlink plugin.
-  "network.providers.starlink.status",
-  // LTE operator name (e.g. "Elisa", "Telia"), which changes on a roam or
-  // (de)registration. Supplied by an LTE modem source.
-  "networking.lte.registerNetworkDisplay",
+  // Unified internet connectivity state (online / metered / offline / captive),
+  // supplied by the signalk-internet plugin. It subsumes the individual
+  // uplink indicators (Starlink pre-seeded there, anything else covered by
+  // its probe), so any transition means the boat's internet path changed and a
+  // fresh announce lets mesh clients switch to a working, non-internet route
+  // at once.
+  "network.internet.state",
 ];
 
 /**
@@ -886,6 +887,28 @@ module.exports = (app) => {
         } catch (e) {
           app.debug(`Messaging setup error: ${e.message}`);
         }
+
+        /**
+         * Re-announces every destination the plugin has brought up, reading
+         * the live handles lazily (embedded nodes and the RFed client may come
+         * up after this helper is defined). Shared by the connectivity-change
+         * trigger, the outbound-freeze watchdog's announce probe and the
+         * reconnect re-announce below.
+         */
+        const announceAll = () =>
+          triggerAnnounce(
+            {
+              lxmf: plugin.lxmf,
+              displayName,
+              nomadnet: plugin.nomadnet,
+              rfed: plugin.rfed,
+              embeddedRfed: plugin.embeddedRfed,
+              propagationLxmf: plugin.embeddedPropagation
+                ? plugin.lxmf
+                : undefined,
+            },
+            app.debug,
+          );
 
         // Publish units/labels for the paths inbound crew telemetry writes
         // to, so instruments render them correctly. Idempotent and safe to
@@ -1694,21 +1717,7 @@ module.exports = (app) => {
                 if (!changed) {
                   return;
                 }
-                Promise.resolve(
-                  triggerAnnounce(
-                    {
-                      lxmf: plugin.lxmf,
-                      displayName,
-                      nomadnet: plugin.nomadnet,
-                      rfed: plugin.rfed,
-                      embeddedRfed: plugin.embeddedRfed,
-                      propagationLxmf: plugin.embeddedPropagation
-                        ? plugin.lxmf
-                        : undefined,
-                    },
-                    app.debug,
-                  ),
-                ).catch((e) =>
+                Promise.resolve(announceAll()).catch((e) =>
                   app.debug(`Connectivity re-announce error: ${e.message}`),
                 );
               },
@@ -1759,19 +1768,7 @@ module.exports = (app) => {
                 app.debug(`Re-arming LXMF announcing failed: ${e.message}`);
               }
             }
-            await triggerAnnounce(
-              {
-                lxmf: plugin.lxmf,
-                displayName,
-                nomadnet: plugin.nomadnet,
-                rfed: plugin.rfed,
-                embeddedRfed: plugin.embeddedRfed,
-                propagationLxmf: plugin.embeddedPropagation
-                  ? plugin.lxmf
-                  : undefined,
-              },
-              app.debug,
-            );
+            await announceAll();
           };
           const freezeWatchdog = deps.watchOutboundFreeze({
             interfaces: recoveryInterfaces,
@@ -1814,6 +1811,33 @@ module.exports = (app) => {
               (s) => s && s.phase !== "ok",
             );
           };
+        }
+
+        // --- Reconnect re-announce ----------------------------------------
+        // A reconnecting interface means the node on the other end may have
+        // forgotten us: rnsd (or any transport instance the plugin talks to
+        // through a shared-instance or client connection) drops the client's
+        // announced destinations when the connection drops, and until it hears
+        // a fresh announce it silently drops every link request and message
+        // peers send us — a dead window of up to the re-announce interval
+        // (30 min by default). The Python reference re-announces every
+        // registered SINGLE destination the moment the shared connection
+        // reappears (`Transport.shared_connection_reappeared`); we do the same
+        // for every interface (debounced, so a flapping connection cannot
+        // storm the mesh). This is attached after the initial connections are
+        // up, so every `connected` event observed here is a re-establishment.
+        if (recoveryInterfaces.length) {
+          unsubscribes.push(
+            watchReconnects({
+              interfaces: recoveryInterfaces.map((entry) => entry.iface),
+              onReconnect: () => {
+                announceAll().catch((e) =>
+                  app.debug(`Reconnect re-announce error: ${e.message}`),
+                );
+              },
+              log: app.debug,
+            }),
+          );
         }
 
         const connectivity = usedSharedInstance

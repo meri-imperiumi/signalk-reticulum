@@ -133,4 +133,83 @@ async function triggerAnnounce(
   return announced;
 }
 
-module.exports = { triggerAnnounce };
+/**
+ * Watches the plugin's connected interfaces for connection *re-establishment*
+ * and fires `onReconnect` — so the caller can immediately re-announce every
+ * destination instead of waiting for the next periodic re-announce.
+ *
+ * This is the plugin-side counterpart of the Python reference's
+ * `Transport.shared_connection_reappeared()`, which re-announces every
+ * registered `SINGLE` destination the moment a local client's connection to
+ * a shared instance (rnsd) is re-established. Without it, a daemon restart or
+ * any connection episode leaves the daemon without a path to the client's
+ * destinations until the client's next periodic announce — on this plugin's
+ * default cadence that is a dead window of up to 30 minutes during which
+ * peers' link requests and messages to the boat are silently dropped by the
+ * daemon ("everything works after a Signal K restart", because startup
+ * announces immediately).
+ *
+ * The watcher is attached after the initial connection is up (the plugin
+ * wires it once `start()` has connected its interfaces), so every `connected`
+ * event it observes is a re-establishment. Triggers are debounced across all
+ * interfaces (`minIntervalMs`) so a flapping connection cannot storm the mesh
+ * with announces — Python's announce ingress control tolerates far more, but
+ * airtime on a slow radio link is precious.
+ *
+ * @param {object} options
+ * @param {Array<{addEventListener:(type:string, cb:(e:unknown)=>void)=>void, removeEventListener:(type:string, cb:(e:unknown)=>void)=>void, name?:string}>} options.interfaces
+ *   The connected interfaces to watch (EventTarget-shaped).
+ * @param {() => void} options.onReconnect - Invoked (debounced) on each
+ *   re-established connection.
+ * @param {number} [options.minIntervalMs=30000] - Minimum spacing between
+ *   triggers across all interfaces.
+ * @param {(...args:any[])=>void} [options.log] - Signal K `app.debug`-style
+ *   logger.
+ * @returns {() => void} stop — removes every listener.
+ */
+function watchReconnects({
+  interfaces,
+  onReconnect,
+  minIntervalMs = 30_000,
+  log,
+}) {
+  const debug = typeof log === "function" ? log : () => {};
+  let lastFiredAt = 0;
+  const off = [];
+  for (const iface of interfaces) {
+    if (!iface || typeof iface.addEventListener !== "function") {
+      continue;
+    }
+    const label = iface.name || "interface";
+    const onConnected = () => {
+      const now = Date.now();
+      if (now - lastFiredAt < minIntervalMs) {
+        debug(
+          `Reconnect of "${label}" within the re-announce debounce window; skipping`,
+        );
+        return;
+      }
+      lastFiredAt = now;
+      debug(
+        `Connection to "${label}" re-established; re-announcing all destinations ` +
+          "so the shared instance and mesh rediscover us immediately",
+      );
+      onReconnect();
+    };
+    iface.addEventListener("connected", onConnected);
+    off.push(() => {
+      try {
+        iface.removeEventListener("connected", onConnected);
+      } catch {
+        /* best effort */
+      }
+    });
+  }
+  return () => {
+    for (const fn of off) {
+      fn();
+    }
+  };
+}
+
+module.exports = { triggerAnnounce, watchReconnects };

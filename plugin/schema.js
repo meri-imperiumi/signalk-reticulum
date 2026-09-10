@@ -189,12 +189,10 @@ function buildPluginSchema(interfaces) {
               "connectivity changes (e.g. the Starlink link dropping or an " +
               "LTE modem roaming to a new operator), instead of waiting up " +
               "to the re-announce interval. Add one entry per connectivity " +
-              "provider. Defaults to the Starlink provider status path and " +
-              "the LTE operator-name path; clear the list to disable.",
-            default: [
-              "network.providers.starlink.status",
-              "networking.lte.registerNetworkDisplay",
-            ],
+              "provider. Defaults to the unified internet state path " +
+              "(signalk-internet), which subsumes the individual uplink " +
+              "indicators (Starlink, LTE, probes); clear the list to disable.",
+            default: ["network.internet.state"],
             items: {
               type: "string",
               title: "Signal K path",

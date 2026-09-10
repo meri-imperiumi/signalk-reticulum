@@ -183,14 +183,11 @@ test("buildPluginSchema exposes an announce group with a 30-minute default", () 
   // from 0 up — Reticulum clamps sub-minute values itself.
   assert.equal(interval.minimum, 0);
 
-  // The connectivity-change trigger defaults to the Starlink and LTE paths
-  // and is an array so more providers can be added.
+  // The connectivity-change trigger defaults to the unified internet
+  // state path and is an array so more providers can be added.
   const paths = announce.properties.connectivity_paths;
   assert.equal(paths.type, "array");
-  assert.deepEqual(paths.default, [
-    "network.providers.starlink.status",
-    "networking.lte.registerNetworkDisplay",
-  ]);
+  assert.deepEqual(paths.default, ["network.internet.state"]);
   assert.equal(paths.items.type, "string");
 });
 

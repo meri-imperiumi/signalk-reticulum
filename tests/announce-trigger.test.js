@@ -251,11 +251,8 @@ test("triggerAnnounce continues when the embedded rfed node announce fails", asy
 
 // --- connectivity path/value helpers --------------------------------------
 
-test("effectiveConnectivityPaths defaults to Starlink and LTE when unset", () => {
-  const expected = [
-    "network.providers.starlink.status",
-    "networking.lte.registerNetworkDisplay",
-  ];
+test("effectiveConnectivityPaths defaults to the unified internet state when unset", () => {
+  const expected = ["network.internet.state"];
   assert.deepEqual(makePlugin.effectiveConnectivityPaths(undefined), expected);
   assert.deepEqual(makePlugin.effectiveConnectivityPaths(null), expected);
   assert.deepEqual(
@@ -299,9 +296,8 @@ test("normalizeConnectivityValue unwraps {value} deltas and stringifies", () => 
   );
 });
 
-test("the default connectivity paths are Starlink and LTE", () => {
+test("the default connectivity paths are the unified internet state", () => {
   assert.deepEqual(makePlugin.DEFAULT_CONNECTIVITY_PATHS, [
-    "network.providers.starlink.status",
-    "networking.lte.registerNetworkDisplay",
+    "network.internet.state",
   ]);
 });
