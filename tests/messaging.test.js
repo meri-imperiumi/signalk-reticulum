@@ -383,3 +383,80 @@ test("makeDeliverer propagates delivery errors", async () => {
 
   Object.assign(deps, REAL_DEPS);
 });
+
+test("makeDeliverer re-sends the same LXMessage when the link reply falls back to opportunistic", async () => {
+  const router = new FakeLxmRouter({}, {});
+  const identity = { id: "me" };
+  deps.LXMessage = FakeLXMessage;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  // The link send throws (peer tore the link down), the opportunistic retry
+  // succeeds. Both wire copies must carry the *same* message identity — a
+  // fresh message per attempt would give each copy a distinct id, and a
+  // deduplicating client would render the reply twice.
+  const attempts = [];
+  router.send = async (message, sentIdentity, linkId) => {
+    attempts.push({ message, linkId });
+    if (linkId) {
+      throw new Error("Link is not available");
+    }
+  };
+
+  const deliver = makeDeliverer(router, identity);
+  const linkId = new Uint8Array(8).fill(2);
+  const sent = await deliver(
+    "0123456789abcdef0123456789abcdef",
+    "",
+    "Pong",
+    linkId,
+  );
+
+  assert.equal(attempts.length, 2, "link attempt + opportunistic retry");
+  assert.ok(attempts[0].linkId, "first attempt is the link reply");
+  assert.ok(!attempts[1].linkId, "retry is opportunistic (no link id)");
+  assert.equal(
+    attempts[0].message,
+    attempts[1].message,
+    "both attempts re-sent one LXMessage object",
+  );
+  assert.equal(
+    sent,
+    attempts[0].message,
+    "the deliverer resolves with the message it sent",
+  );
+
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("makeDeliverer sends a prebuilt LXMessage as-is instead of building a new one", async () => {
+  const router = new FakeLxmRouter({}, {});
+  const identity = { id: "me" };
+  deps.LXMessage = FakeLXMessage;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  const deliver = makeDeliverer(router, identity);
+  const prebuilt = new FakeLXMessage({
+    sourceHash: router.deliveryDest.destinationHash,
+    destinationHash: Buffer.from("0123456789abcdef0123456789abcdef", "hex"),
+    title: "",
+    content: "Pong",
+    timestamp: 1234.5,
+  });
+  const sent = await deliver(
+    "0123456789abcdef0123456789abcdef",
+    "",
+    "different content, ignored",
+    null,
+    prebuilt,
+  );
+
+  assert.equal(sent, prebuilt, "the prebuilt message is the one returned");
+  assert.equal(router.sent.length, 1);
+  assert.equal(
+    router.sent[0].message,
+    prebuilt,
+    "the prebuilt message is sent untouched",
+  );
+
+  Object.assign(deps, REAL_DEPS);
+});

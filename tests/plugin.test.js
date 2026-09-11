@@ -1227,6 +1227,102 @@ test('an incoming "ping" that arrived over a Link is replied over that same link
   );
 });
 
+test("a duplicate inbound command (second delivery path or retry) is handled once", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  await plugin.start({ messaging: {} });
+  const router = plugin.lxmf;
+
+  // The same LXMF message id — the same message arriving again over another
+  // path (link + opportunistic, a propagation sync, a sender retry) must not
+  // re-run the command and re-reply.
+  const messageId = new Uint8Array(32).fill(5);
+  const dispatch = (detail) =>
+    router.dispatchEvent(new CustomEvent("message", { detail }));
+  dispatch({
+    message: {
+      sourceHash: new Uint8Array(16).fill(4),
+      content: "ping",
+      messageId,
+    },
+  });
+  dispatch({
+    message: {
+      sourceHash: new Uint8Array(16).fill(4),
+      content: "ping",
+      messageId,
+    },
+  });
+  dispatch({
+    message: {
+      sourceHash: new Uint8Array(16).fill(4),
+      content: "ping",
+      messageId,
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(router.sent.length, 1, "only the first copy is replied to");
+
+  // A *different* message (fresh id) is new traffic and gets its reply.
+  dispatch({
+    message: {
+      sourceHash: new Uint8Array(16).fill(4),
+      content: "ping",
+      messageId: new Uint8Array(32).fill(6),
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(router.sent.length, 2, "a distinct message id is handled");
+});
+
+test("a digital switching command delivered over two paths switches once and replies once", async () => {
+  const app = makeApp();
+  const puts = [];
+  app.putSelfPath = (path, value, cb) => {
+    puts.push({ path, value });
+    setImmediate(cb, { state: "COMPLETED", statusCode: 200 });
+  };
+  const plugin = makePlugin(app);
+  const identityHash = "7a3c9f1b2e4d58607a3c9f1b2e4d5860";
+  const source = Buffer.from(deriveLxmfDestinationHash(identityHash), "hex");
+  await plugin.start({
+    messaging: { digital_switching: true },
+    crew: [{ name: "Alice", identity: identityHash }],
+  });
+  const router = plugin.lxmf;
+
+  // "Turn cockpitLight off" sent once by the crew, but delivered twice —
+  // e.g. the direct copy plus the same message synced back from the
+  // propagation node. Both copies share one LXMF message id.
+  const messageId = new Uint8Array(32).fill(9);
+  const dispatch = (link) =>
+    router.dispatchEvent(
+      new CustomEvent("message", {
+        detail: {
+          message: {
+            sourceHash: source,
+            content: "Turn cockpitLight off",
+            messageId,
+          },
+          link,
+        },
+      }),
+    );
+  dispatch(new Uint8Array(8).fill(1)); // over the arrival link
+  dispatch(null); // again, opportunistically / via a sync
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(puts.length, 1, "the switch is written exactly once");
+  assert.equal(puts[0].path, "electrical.switches.cockpitLight.state");
+  assert.equal(puts[0].value, false);
+  assert.equal(router.sent.length, 1, "exactly one OK reply");
+  assert.equal(
+    router.sent[0].message.options.content,
+    "OK, cockpitLight is off",
+  );
+});
+
 test("an unmatched LXMF message does not trigger a reply", async () => {
   const app = makeApp();
   const plugin = makePlugin(app);

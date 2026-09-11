@@ -8,6 +8,7 @@ const {
   normalizeNodeHash,
   configurePropagationNode,
   syncFromNode,
+  makeMessageBuilder,
   makePropagationDeliverer,
   makeAutoDeliverer,
   submitToEmbeddedNode,
@@ -222,6 +223,38 @@ test("makePropagationDeliverer logs the stamp cost on success", async () => {
   Object.assign(deps, REAL_DEPS);
 });
 
+test("makePropagationDeliverer submits a prebuilt LXMessage as-is instead of building a new one", async () => {
+  const router = new FakeLxmRouter();
+  const identity = { id: "me" };
+  deps.LXMessage = FakeLXMessage;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  const deliver = makePropagationDeliverer(router, identity);
+  const prebuilt = new FakeLXMessage({
+    sourceHash: router.deliveryDest.destinationHash,
+    destinationHash: Buffer.from("0123456789abcdef0123456789abcdef", "hex"),
+    title: "",
+    content: "Pong",
+    timestamp: 1234.5,
+  });
+  await deliver(
+    "0123456789abcdef0123456789abcdef",
+    "",
+    "different content, ignored",
+    null,
+    prebuilt,
+  );
+
+  assert.equal(router.submitted.length, 1);
+  assert.equal(
+    router.submitted[0].message,
+    prebuilt,
+    "the prebuilt message is submitted untouched (same message id as the failed direct attempt)",
+  );
+
+  Object.assign(deps, REAL_DEPS);
+});
+
 test("makePropagationDeliverer propagates submit errors", async () => {
   const router = new FakeLxmRouter();
   router.submitToPropagationNode = async () => {
@@ -237,6 +270,96 @@ test("makePropagationDeliverer propagates submit errors", async () => {
   );
 
   Object.assign(deps, REAL_DEPS);
+});
+
+// --- makeMessageBuilder ----------------------------------------------------
+
+test("makeMessageBuilder builds an LXMessage bound to the router's delivery destination", () => {
+  const router = new FakeLxmRouter();
+  deps.LXMessage = FakeLXMessage;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  const buildMessage = makeMessageBuilder(router);
+  const message = buildMessage(
+    "0123456789abcdef0123456789abcdef",
+    "Signal K: electrical.bilge",
+    "Bilge high!",
+  );
+
+  assert.ok(message instanceof FakeLXMessage);
+  assert.equal(
+    message.options.sourceHash,
+    router.deliveryDest.destinationHash,
+    "sent from the node's own delivery destination",
+  );
+  assert.deepEqual(
+    message.options.destinationHash,
+    Buffer.from("0123456789abcdef0123456789abcdef", "hex"),
+  );
+  assert.equal(message.options.title, "Signal K: electrical.bilge");
+  assert.equal(message.options.content, "Bilge high!");
+
+  Object.assign(deps, REAL_DEPS);
+});
+
+// --- shared message identity across the fallback ----------------------------
+
+test("makeAutoDeliverer threads one prebuilt message through direct and propagation attempts", async () => {
+  const seen = [];
+  const direct = async (hashHex, title, content, linkId, prebuilt) => {
+    seen.push({ via: "direct", prebuilt });
+    // The direct attempt fails (e.g. proof timeout) so the fallback fires.
+    throw new Error("no delivery proof was received from the recipient");
+  };
+  const propagation = async (hashHex, title, content, linkId, prebuilt) => {
+    seen.push({ via: "propagation", prebuilt });
+  };
+  const message = { sentinel: true };
+  const deliver = makeAutoDeliverer({
+    directDeliver: direct,
+    propagationDeliver: propagation,
+    hasPath: () => true,
+    fromHex: (hex) => Buffer.from(hex, "hex"),
+    buildMessage: () => message,
+  });
+
+  await deliver("0123456789abcdef0123456789abcdef", "", "Pong");
+
+  assert.deepEqual(
+    seen.map((s) => s.via),
+    ["direct", "propagation"],
+    "direct attempted first, propagation stored the fallback",
+  );
+  assert.equal(
+    seen[0].prebuilt,
+    message,
+    "the direct deliverer received the shared message",
+  );
+  assert.equal(
+    seen[1].prebuilt,
+    message,
+    "the propagation fallback re-sent the *same* message, so both copies share one message id and deduplicate client-side",
+  );
+});
+
+test("makeAutoDeliverer passes no prebuilt message when buildMessage is omitted", async () => {
+  const seen = [];
+  const direct = async (hashHex, title, content, linkId, prebuilt) => {
+    seen.push(prebuilt);
+  };
+  const deliver = makeAutoDeliverer({
+    directDeliver: direct,
+    propagationDeliver: async () => {},
+    fromHex: (hex) => Buffer.from(hex, "hex"),
+  });
+
+  await deliver("0123456789abcdef0123456789abcdef", "t", "c");
+
+  assert.equal(
+    seen[0],
+    undefined,
+    "deliverers without a builder keep their plain (dest, title, content, linkId) contract",
+  );
 });
 
 // --- makeAutoDeliverer ------------------------------------------------------
@@ -545,6 +668,58 @@ test("makeAutoDeliverer uses the embedded fallback only when no path is known", 
     await deliver(recipientHashHex, "Alert", "Bilge!");
     assert.equal(directCalls.length, 1, "delivered directly (path exists)");
     assert.equal(node.store.size, 1, "no extra store entry");
+  } finally {
+    await rns.stop();
+  }
+});
+
+test("makeEmbeddedPropagationDeliverer submits a prebuilt LXMessage as-is", async () => {
+  const { rns, identity, router, node } = await makeEmbeddedRouter();
+  try {
+    const recipient = await Identity.generate();
+    const recipientHashHex = toHex(await deliveryHashFor(recipient));
+    await rememberRecipient(recipient, Buffer.from(recipientHashHex, "hex"));
+
+    // Record what the packing step was handed: the prebuilt instance must be
+    // packed and ingested untouched, so the stored copy shares the message id
+    // of the failed direct attempt and deduplicates client-side.
+    const packed = [];
+    const origPack = router._packForPropagationSubmit.bind(router);
+    router._packForPropagationSubmit = async (message, id, cost) => {
+      packed.push(message);
+      return origPack(message, id, cost);
+    };
+
+    const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
+    const prebuilt = new LXMessage({
+      sourceHash: router.deliveryDest.destinationHash,
+      destinationHash: Buffer.from(recipientHashHex, "hex"),
+      title: "",
+      content: "Pong",
+    });
+
+    const deliver = makeEmbeddedPropagationDeliverer(
+      router,
+      node,
+      identity,
+      () => {},
+    );
+    assert.equal(node.store.size, 0);
+    await deliver(
+      recipientHashHex,
+      "ignored title",
+      "ignored content",
+      null,
+      prebuilt,
+    );
+
+    assert.equal(packed.length, 1);
+    assert.equal(
+      packed[0],
+      prebuilt,
+      "the prebuilt message was packed, not a fresh one from the string args",
+    );
+    assert.equal(node.store.size, 1, "message stored for the recipient");
   } finally {
     await rns.stop();
   }

@@ -117,6 +117,16 @@ async function setupMessaging(rns, identity, options = {}, log = () => {}) {
  * notification forwarding, or an opportunistic inbound message) the reply is
  * sent opportunistically directly.
  *
+ * One LXMessage identity per logical reply: the message is built once per
+ * call (or taken from the optional `prebuilt` argument — see
+ * {@link module:propagation~makeAutoDeliverer}) and the same object is re-sent
+ * on the opportunistic fallback. Every wire copy of one reply therefore shares
+ * one message id, so a client that deduplicates by message hash (Sideband,
+ * Nomad Network) shows the reply once even when a fallback copy also arrives —
+ * minting a fresh message per attempt would give each copy a distinct id and
+ * turn every fallback into a visible duplicate. The sent message is returned
+ * so wrapping deliverers can thread the same identity into their fallbacks.
+ *
  * Rejects if the recipient's identity is unknown or delivery fails; the caller
  * (notification forwarding) logs and continues with the next recipient.
  *
@@ -124,19 +134,30 @@ async function setupMessaging(rns, identity, options = {}, log = () => {}) {
  * @param {object} identity - The sender Reticulum identity.
  * @param {(...args:any[])=>void} [debug] - Signal K `app.debug`-style logger
  *   used to record each delivery outcome (link, opportunistic, or fallback).
- * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null)=>Promise<void>}
+ * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, prebuilt?:object)=>Promise<object>}
+ *   Resolves with the LXMessage that was sent (the prebuilt one when given).
  */
 function makeDeliverer(lxmf, identity, debug = () => {}) {
-  return async function deliver(destinationHashHex, title, content, linkId) {
+  return async function deliver(
+    destinationHashHex,
+    title,
+    content,
+    linkId,
+    prebuilt,
+  ) {
     const build = () =>
+      prebuilt ||
       new deps.LXMessage({
         sourceHash: lxmf.deliveryDest.destinationHash,
         destinationHash: deps.fromHex(destinationHashHex),
         title,
         content,
       });
+    // Built once, re-sent as-is on the fallback below: both wire copies share
+    // one message id, so a deduplicating client renders the reply once.
+    const message = build();
     try {
-      await lxmf.send(build(), identity, linkId);
+      await lxmf.send(message, identity, linkId);
       debug(
         `LXMF message delivered to ${destinationHashHex}${
           linkId ? " via the arrival link" : " (opportunistic)"
@@ -148,14 +169,16 @@ function makeDeliverer(lxmf, identity, debug = () => {}) {
       // The link reply failed (typically the peer closed the link after its
       // message was acknowledged). Retry as an opportunistic single packet —
       // the delivery path telemetry/alerts already use to reach these peers.
+      // The same message object is re-sent so both copies share one id.
       debug(
         `LXMF link reply to ${destinationHashHex} failed (${e.message}); retrying opportunistic`,
       );
-      await lxmf.send(build(), identity, null);
+      await lxmf.send(message, identity, null);
       debug(
         `LXMF message delivered to ${destinationHashHex} (opportunistic fallback)`,
       );
     }
+    return message;
   };
 }
 

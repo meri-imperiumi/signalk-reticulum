@@ -42,10 +42,12 @@ const {
   normalizeNodeHash,
   configurePropagationNode,
   syncFromNode,
+  makeMessageBuilder,
   makePropagationDeliverer,
   makeAutoDeliverer,
   makeEmbeddedPropagationDeliverer,
 } = require("./propagation");
+const { makeRecentFilter, messageKey } = require("./dedup");
 const {
   setupEmbeddedPropagationNode,
   setupEmbeddedRFedNode,
@@ -765,7 +767,15 @@ module.exports = (app) => {
             );
 
           // Handle incoming LXMF messages (ping/pong, and future commands)
-          // from any peer on the mesh.
+          // from any peer on the mesh. The same message can arrive more than
+          // once — a sender retry, the same copy over a link and again as an
+          // opportunistic packet, a propagation-node sync — and every arrival
+          // dispatches, so without deduplication each copy would re-run the
+          // command and re-reply ("OK, cockpitLight is off" four times).
+          // LXMF message ids are content-derived, so a bounded "recently
+          // seen" filter collapses all copies into the first, exactly like
+          // LXMF clients deduplicate inbound messages by message hash.
+          const seenInbound = makeRecentFilter();
           const onLxmfMessage = async (event) => {
             const message = event && event.detail && event.detail.message;
             // The arrival Link id: replies sent over this established Link are
@@ -779,6 +789,14 @@ module.exports = (app) => {
             app.debug(
               `Received LXMF message from ${toHex(message.sourceHash || [])}`,
             );
+            const inboundKey = messageKey(message, toHex);
+            if (inboundKey && !seenInbound(inboundKey)) {
+              app.debug(
+                `Duplicate LXMF message ${inboundKey} ignored ` +
+                  "(already handled via another delivery path or a retry)",
+              );
+              return;
+            }
             // Populate Signal K from any telemetry snapshot a crew member's
             // device sent us (position, battery, environment). Runs before
             // the command handler; telemetry messages carry no command text,
@@ -1187,6 +1205,11 @@ module.exports = (app) => {
           deliverOutbound = makeAutoDeliverer({
             directDeliver: deliver,
             propagationDeliver,
+            // One LXMessage identity per reply, shared by the direct attempt
+            // and the store-and-forward fallback, so a fallback copy the peer
+            // receives alongside the direct one deduplicates client-side
+            // instead of showing up as a duplicate reply.
+            buildMessage: makeMessageBuilder(plugin.lxmf),
             hasPath:
               rns.transport && typeof rns.transport.hasPath === "function"
                 ? rns.transport.hasPath.bind(rns.transport)
@@ -1305,6 +1328,10 @@ module.exports = (app) => {
             deliverOutbound = makeAutoDeliverer({
               directDeliver: deliver,
               propagationDeliver,
+              // One LXMessage identity per reply, shared by the direct attempt
+              // and the store-and-forward fallback (see the embedded wiring
+              // above for the rationale).
+              buildMessage: makeMessageBuilder(plugin.lxmf),
               hasPath:
                 rns.transport && typeof rns.transport.hasPath === "function"
                   ? rns.transport.hasPath.bind(rns.transport)
