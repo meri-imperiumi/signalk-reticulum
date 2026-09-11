@@ -36,8 +36,8 @@
   },
   "dependencies": {
     "@digitaldefiance/bzip2-wasm": "^1.1.1",
-    "@reticulum/core": "^0.7.1",
-    "@reticulum/node": "^0.7.1"
+    "@reticulum/core": "^0.7.2",
+    "@reticulum/node": "^0.7.2"
   },
   "devDependencies": {
     "@signalk/server-api": "^2.30.0"

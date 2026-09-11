@@ -147,9 +147,11 @@ test("a reply to an unreachable peer falls back to the embedded propagation node
     // path — remains, exactly like the field failure.
     ifA.peer = null;
 
-    const started = Date.now();
+    // Monotonic clock: a wall-clock jump mid-test (an NTP/NITZ sync on the
+    // host) once read a 19 s run as 77 s and tripped the bound below.
+    const started = process.hrtime.bigint();
     await deliverOutbound(bHash, "", "Pong");
-    const elapsed = Date.now() - started;
+    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
 
     // The reply was stored for the client instead of vanishing.
     assert.equal(
