@@ -63,6 +63,17 @@ test("switching accepts 'turn decklight on' when enabled", () => {
   );
 });
 
+test("switching accepts nested switch paths like Cerbo GX relays", () => {
+  assert.equal(
+    switching.accept(makeMessage("turn gx.gxInternalRelay1 on"), ENABLED),
+    true,
+  );
+  assert.equal(
+    switching.accept(makeMessage("Turn gx.gxInternalRelay2 Off"), ENABLED),
+    true,
+  );
+});
+
 test("switching accepts 'Turn Decklight Off' (case-insensitive)", () => {
   assert.equal(
     switching.accept(makeMessage("Turn Decklight Off"), ENABLED),
@@ -149,6 +160,25 @@ test("handle sets the state to false for 'off'", async () => {
   // The switch name is echoed in its original casing; the on/off word is
   // normalised to lowercase.
   assert.equal(calls[0].content, "OK, Decklight is off");
+});
+
+test("handle switches a Cerbo GX relay off and replies with the full path", async () => {
+  const { deliver, calls } = makeDeliver();
+  const { app, puts } = makeApp();
+
+  await switching.handle(
+    makeMessage("turn gx.gxInternalRelay2 off"),
+    ENABLED,
+    deliver,
+    app,
+  );
+
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].path, "electrical.switches.gx.gxInternalRelay2.state");
+  assert.equal(puts[0].value, false);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].content, "OK, gx.gxInternalRelay2 is off");
 });
 
 test("handle forwards the arrival link id on the reply", async () => {

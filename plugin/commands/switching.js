@@ -20,9 +20,10 @@
 
 const { toHex } = require("@reticulum/core");
 
-/** Matches "turn <name> on|off", case-insensitive. The switch name is a single
- * alphanumeric word (no spaces), matching the signalk-meshtastic parser. */
-const SWITCH_RE = /turn ([a-z0-9]+) (on|off)/i;
+/** Matches "turn <name> on|off", case-insensitive. Switch names may contain
+ * dots to address nested switches, like Cerbo GX relays
+ * ("turn gx.gxInternalRelay1 on"), matching the signalk-meshtastic parser. */
+const SWITCH_RE = /turn ([a-z0-9]+(?:\.[a-z0-9]+)*) (on|off)/i;
 
 /**
  * @param {{content?:string}|null|undefined} message
