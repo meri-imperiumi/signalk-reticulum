@@ -31,11 +31,7 @@
  */
 
 const RNS = require("@reticulum/core");
-// LXMF moved out of the package root in @reticulum/core 0.6 — deep-import it.
-const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
-const {
-  unpackPropagationContainer,
-} = require("@reticulum/core/src/lxmf/propagation.js");
+const { LXMessage, unpackPropagationContainer } = require("@reticulum/lxmf");
 
 /** Injected transport classes; tests swap these for fakes. */
 const deps = {

@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { Reticulum, Identity, toHex } = require("@reticulum/core");
-const { LXMRouter } = require("@reticulum/core/src/lxmf/index.js");
+const { LXMRouter } = require("@reticulum/lxmf");
 const {
   deps,
   normalizeNodeHash,
@@ -559,7 +559,7 @@ test("submitToEmbeddedNode stores a message addressed to a remote recipient", as
     const recipientHash = await deliveryHashFor(recipient);
     await rememberRecipient(recipient, recipientHash);
 
-    const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
+    const { LXMessage } = require("@reticulum/lxmf");
     const message = new LXMessage({
       sourceHash: router.deliveryDest.destinationHash,
       destinationHash: recipientHash,
@@ -587,7 +587,7 @@ test("submitToEmbeddedNode auto-delivers a message addressed to this node", asyn
       received.push(event.detail.message);
     });
 
-    const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
+    const { LXMessage } = require("@reticulum/lxmf");
     const message = new LXMessage({
       sourceHash: router.deliveryDest.destinationHash,
       destinationHash: router.deliveryDest.destinationHash,
@@ -690,7 +690,7 @@ test("makeEmbeddedPropagationDeliverer submits a prebuilt LXMessage as-is", asyn
       return origPack(message, id, cost);
     };
 
-    const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
+    const { LXMessage } = require("@reticulum/lxmf");
     const prebuilt = new LXMessage({
       sourceHash: router.deliveryDest.destinationHash,
       destinationHash: Buffer.from(recipientHashHex, "hex"),

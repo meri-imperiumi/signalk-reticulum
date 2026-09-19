@@ -8,7 +8,7 @@ const {
   SubscriptionTable,
   DeferredQueue,
   NotifyRegistry,
-} = require("@reticulum/core/src/rfed/index.js");
+} = require("@reticulum/rfed");
 const rfed = require("../plugin/rfed");
 const {
   SCHEMA_VERSION,
@@ -710,11 +710,8 @@ async function makeEmbeddedNode() {
 
 /** Wraps a packed snapshot as a SEND payload from `senderIdentity` on `channel`. */
 async function wrapRemoteSendPayload(channel, senderIdentity, packed) {
-  const {
-    deriveChannel,
-    deliveryHashFor,
-  } = require("@reticulum/core/src/rfed/channel.js");
-  const { wrapChannelMessage } = require("@reticulum/core/src/rfed/blob.js");
+  const { deriveChannel, deliveryHashFor } = require("@reticulum/rfed");
+  const { wrapChannelMessage } = require("@reticulum/rfed");
   const { identity: channelIdentity } = await deriveChannel(channel);
   const senderLxmDeliveryHash = await deliveryHashFor(senderIdentity);
   const message = new rfed.deps.LXMessage({
@@ -903,9 +900,9 @@ test("setupEmbeddedRFedClient ignores blobs for a different channel", async () =
 test("setupEmbeddedRFedClient registers a local subscription so peer sync pulls the channel", async () => {
   const { rns, identity, node } = await makeEmbeddedNode();
   try {
-    const { deriveChannel } = require("@reticulum/core/src/rfed/channel.js");
-    const { gapFromPeer } = require("@reticulum/core/src/rfed/sync.js");
-    const { BlobStore } = require("@reticulum/core/src/rfed/index.js");
+    const { deriveChannel } = require("@reticulum/rfed");
+    const { gapFromPeer } = require("@reticulum/rfed");
+    const { BlobStore } = require("@reticulum/rfed");
     const { channelHash } = await deriveChannel(DEFAULT_CHANNEL);
     const channelHex = toHex(channelHash);
 

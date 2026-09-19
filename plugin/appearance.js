@@ -26,7 +26,7 @@
  */
 
 // LXMF moved out of the package root in @reticulum/core 0.6 — deep-import it.
-const { LXMFConstants } = require("@reticulum/core/src/lxmf/index.js");
+const { LXMFConstants } = require("@reticulum/lxmf");
 
 /** Spec field id for the sender icon/colors (LXMF/LXMF.py:11). */
 const FIELD_ICON_APPEARANCE = LXMFConstants.FIELD_ICON_APPEARANCE;

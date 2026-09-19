@@ -14,34 +14,11 @@
  */
 
 const RNS = require("@reticulum/core");
-// LXMF and RFed moved out of the package root in @reticulum/core 0.6 —
-// deep-import them by subpath.
-const { RFedNode } = require("@reticulum/core/src/rfed/index.js");
+const { RFedNode } = require("@reticulum/rfed");
 
-// Storage utilities from @reticulum/node (CommonJS build)
-let storageLxmf, storageRfed;
-try {
-  const nodePath = require.resolve("@reticulum/node");
-  storageLxmf = require(`${nodePath}/../build/storage/lxmf.cjs`);
-  storageRfed = require(`${nodePath}/../build/storage/rfed.cjs`);
-} catch (_e) {
-  // Fall back to source if build not available (dev mode)
-  try {
-    storageLxmf = require("@reticulum/node/src/storage/lxmf.js");
-    storageRfed = require("@reticulum/node/src/storage/rfed.js");
-  } catch (_e2) {
-    console.warn("Could not load @reticulum/node storage modules");
-  }
-}
-
-const { loadLXMFStore, saveLXMFStore } = storageLxmf || {
-  loadLXMFStore: null,
-  saveLXMFStore: null,
-};
-const { loadRFedStores, saveRFedStores } = storageRfed || {
-  loadRFedStores: null,
-  saveRFedStores: null,
-};
+// Storage utilities from @reticulum/node, exported top-level since 0.8
+const { loadLXMFStore, saveLXMFStore, loadRFedStores, saveRFedStores } =
+  require("@reticulum/node");
 
 /** Default maintenance interval (seconds) - same as rfed CLI */
 const MAINTENANCE_INTERVAL_DEFAULT = 3600;
@@ -89,11 +66,6 @@ async function setupEmbeddedPropagationNode({
   announceIntervalMs,
   log = () => {},
 }) {
-  if (!deps.loadLXMFStore || !deps.saveLXMFStore) {
-    log("LXMF storage modules not available; propagation node disabled");
-    return { node: null, teardown: () => {} };
-  }
-
   const propConfig = config?.embedded_nodes?.propagation || {};
   const enabled = propConfig.enabled !== false; // Default to true
 
@@ -296,11 +268,6 @@ async function setupEmbeddedRFedNode({
   announceIntervalMs,
   log = () => {},
 }) {
-  if (!deps.loadRFedStores || !deps.saveRFedStores) {
-    log("RFed storage modules not available; federation node disabled");
-    return { node: null, teardown: () => {} };
-  }
-
   const rfedConfig = config?.embedded_nodes?.rfed || {};
   const enabled = rfedConfig.enabled !== false; // Default to true
 
@@ -356,7 +323,7 @@ async function setupEmbeddedRFedNode({
   if (!stores) {
     // Create empty stores if no data directory
     const { BlobStore, SubscriptionTable, DeferredQueue, NotifyRegistry } =
-      require("@reticulum/core/src/rfed/index.js");
+      require("@reticulum/rfed");
     stores = {
       blobStore: new BlobStore({ storageLimitBytes }),
       subscriptions: new SubscriptionTable(),

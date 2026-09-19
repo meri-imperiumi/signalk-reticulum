@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { Reticulum, Identity, toHex } = require("@reticulum/core");
-const { LXMRouter, LXMessage } = require("@reticulum/core/src/lxmf/index.js");
+const { LXMRouter, LXMessage } = require("@reticulum/lxmf");
 const {
   LinkStatus,
   LinkTeardownReason,

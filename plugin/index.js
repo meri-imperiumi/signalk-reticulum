@@ -4,13 +4,8 @@
  * @param {import("@signalk/server-api").ServerAPI} app
  * @returns {import("@signalk/server-api").Plugin}
  */
-const {
-  Reticulum,
-  toHex,
-  fromHex,
-  LXMessage,
-  Destination,
-} = require("@reticulum/core");
+const { Reticulum, toHex, fromHex, Destination } = require("@reticulum/core");
+const { LXMessage } = require("@reticulum/lxmf");
 const {
   getInterface,
   listInterfaces,

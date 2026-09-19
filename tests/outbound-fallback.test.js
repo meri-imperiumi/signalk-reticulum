@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { Reticulum, Identity, toHex } = require("@reticulum/core");
-const { LXMRouter } = require("@reticulum/core/src/lxmf/index.js");
+const { LXMRouter } = require("@reticulum/lxmf");
 const { PacketReceipt } = require("@reticulum/core/src/core/packet_receipt.js");
 const { setupMessaging, makeDeliverer } = require("../plugin/messaging");
 const {

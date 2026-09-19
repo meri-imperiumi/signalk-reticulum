@@ -31,10 +31,8 @@
  */
 
 const RNS = require("@reticulum/core");
-// LXMF and RFed moved out of the package root in @reticulum/core 0.6 —
-// deep-import them by subpath.
-const { LXMessage } = require("@reticulum/core/src/lxmf/index.js");
-const { RFedClient } = require("@reticulum/core/src/rfed/index.js");
+const { LXMessage } = require("@reticulum/lxmf");
+const { RFedClient } = require("@reticulum/rfed");
 const { FIELD_TELEMETRY } = require("./telemetry");
 const { extractTelemetryField } = require("./telemetry");
 
@@ -522,9 +520,7 @@ async function pullDeferredMessages(
             log(`Pulled message for unknown channel`);
             continue;
           }
-          const {
-            unwrapChannelMessage,
-          } = require("@reticulum/core/src/rfed/blob.js");
+          const { unwrapChannelMessage } = require("@reticulum/rfed");
           const decoded = await unwrapChannelMessage({
             innerBlob: item.blob,
             channelIdentity: channelEntry.identity,
@@ -693,11 +689,8 @@ function makeEmbeddedShipTelemetryPublisher(node, senderIdentity, channel) {
     if (!node || !packedTelemetry) {
       return;
     }
-    const {
-      deriveChannel,
-      deliveryHashFor,
-    } = require("@reticulum/core/src/rfed/channel.js");
-    const { wrapChannelMessage } = require("@reticulum/core/src/rfed/blob.js");
+    const { deriveChannel, deliveryHashFor } = require("@reticulum/rfed");
+    const { wrapChannelMessage } = require("@reticulum/rfed");
     const { identity: channelIdentity, channelHash } =
       await deriveChannel(channel);
     const senderLxmDeliveryHash = await deliveryHashFor(senderIdentity);
@@ -784,11 +777,8 @@ async function setupEmbeddedRFedClient(
   if (!node) {
     return { teardown: () => {} };
   }
-  const {
-    deriveChannel,
-    deliveryHashFor,
-  } = require("@reticulum/core/src/rfed/channel.js");
-  const { unwrapChannelMessage } = require("@reticulum/core/src/rfed/blob.js");
+  const { deriveChannel, deliveryHashFor } = require("@reticulum/rfed");
+  const { unwrapChannelMessage } = require("@reticulum/rfed");
   const { identity: channelIdentity, channelHash: expectedChannelHash } =
     await deriveChannel(channel);
   const channelDeliveryHash = await deliveryHashFor(channelIdentity);
