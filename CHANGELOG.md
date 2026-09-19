@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.6.0] - 2026-09-20
 ### Changed
 - Updated `@reticulum` dependencies to **0.8.2**. LXMF and rfed moved out of `@reticulum/core` into their own packages: the plugin now imports from `@reticulum/lxmf` and `@reticulum/rfed` (new dependencies) instead of deep-importing `@reticulum/core/src/lxmf/*` and `@reticulum/core/src/rfed/*`. The LXMF/rfed persistence helpers (`loadLXMFStore`, `saveLXMFStore`, `loadRFedStores`, `saveRFedStores`) are now imported from the `@reticulum/node` top level; the never-published CommonJS-build require fallback and its dead "storage modules not available" guards were removed along the way
 
