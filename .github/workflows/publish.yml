@@ -19,6 +19,10 @@ jobs:
           node-version: 24
           package-manager-cache: false  # never use caching in release builds
       - run: npm install
+      - name: Install Python RNS/LXMF for the interop smoketest
+        # Deliberately pinned (see test.yml): the release gate must exercise
+        # the crew-delivery path against the same Python stack the boat runs.
+        run: python3 -m pip install --user --break-system-packages rns==1.5.4 lxmf==1.0.1
       - run: npm test
 
   publish-npm:

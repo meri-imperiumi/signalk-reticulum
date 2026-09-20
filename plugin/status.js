@@ -47,6 +47,32 @@ function getInterfaceStats(iface) {
     return null;
   }
   const name = iface.name || "unknown";
+  /** Ingress-control counters (burst latches, held announces, dropped path
+   * requests, protocol violations) from `Interface.getStats()`. Present on
+   * real interfaces (@reticulum/core 0.7+); absent on ad-hoc test fakes. A
+   * blackholed announce path is the field failure behind "the node looks
+   * online but nothing is delivered", so these are surfaced as Signal K
+   * paths for remote diagnosis. */
+  let ingress = null;
+  if (typeof iface.getStats === "function") {
+    try {
+      const stats = iface.getStats();
+      if (stats && typeof stats === "object") {
+        ingress = {
+          announceBurstActive: !!stats.announceBurstActive,
+          announceBurstCount: Number(stats.announceBurstCount) || 0,
+          heldAnnounces: Number(stats.heldAnnounces) || 0,
+          prBurstActive: !!stats.prBurstActive,
+          prBurstCount: Number(stats.prBurstCount) || 0,
+          prBurstDrops: Number(stats.prBurstDrops) || 0,
+          protocolViolations: Number(stats.protocolViolations) || 0,
+          packetFilterHits: Number(stats.packetFilterHits) || 0,
+        };
+      }
+    } catch {
+      /* best effort */
+    }
+  }
   return {
     id: sanitizePathSegment(name),
     name,
@@ -55,6 +81,7 @@ function getInterfaceStats(iface) {
     bitrate: Number(iface.bitrate) || 0,
     rxb: Number(iface.rxb) || 0,
     txb: Number(iface.txb) || 0,
+    ingress,
   };
 }
 
@@ -271,6 +298,7 @@ async function formatStatusValues(
         bitrate: iface.bitrate,
         bytesReceived: iface.rxb,
         bytesTransmitted: iface.txb,
+        ...(iface.ingress ? { ingressControl: iface.ingress } : {}),
       })),
     },
     {
@@ -298,6 +326,43 @@ async function formatStatusValues(
         value: iface.txb,
       },
     );
+    // Ingress-control counters, when the interface reports them: an announce
+    // burst latch holding mesh announces (or a PR-burst dropping path
+    // requests) is exactly the "node looks healthy but nothing is delivered"
+    // failure class, so the operator can read the live latch state, held
+    // announce backlog and drop counts straight off the Signal K paths.
+    if (iface.ingress) {
+      values.push(
+        {
+          path: `communication.reticulum.interfaces.${iface.id}.announceBurstActive`,
+          value: iface.ingress.announceBurstActive,
+        },
+        {
+          path: `communication.reticulum.interfaces.${iface.id}.announceBurstCount`,
+          value: iface.ingress.announceBurstCount,
+        },
+        {
+          path: `communication.reticulum.interfaces.${iface.id}.heldAnnounces`,
+          value: iface.ingress.heldAnnounces,
+        },
+        {
+          path: `communication.reticulum.interfaces.${iface.id}.prBurstActive`,
+          value: iface.ingress.prBurstActive,
+        },
+        {
+          path: `communication.reticulum.interfaces.${iface.id}.prBurstDrops`,
+          value: iface.ingress.prBurstDrops,
+        },
+        {
+          path: `communication.reticulum.interfaces.${iface.id}.protocolViolations`,
+          value: iface.ingress.protocolViolations,
+        },
+        {
+          path: `communication.reticulum.interfaces.${iface.id}.packetFilterHits`,
+          value: iface.ingress.packetFilterHits,
+        },
+      );
+    }
   }
 
   // Host-load health from the recovery layer (event-loop lag, whether any

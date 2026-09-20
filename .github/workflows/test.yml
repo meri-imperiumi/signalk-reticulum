@@ -16,6 +16,11 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
     - run: npm install
+    - name: Install Python RNS/LXMF for the interop smoketest
+      # Deliberately pinned: these are the versions the interop gate was
+      # validated against. Bumping them is a deliberate interop decision,
+      # not something CI should pick up silently.
+      run: python3 -m pip install --user --break-system-packages rns==1.5.4 lxmf==1.0.1
     - run: npm test
       env:
         CI: true

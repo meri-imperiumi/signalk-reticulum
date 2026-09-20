@@ -454,3 +454,113 @@ test("lxmfPropagationNode prefers the embedded node over the client value", asyn
   );
   assert.equal(stored.value, 2);
 });
+
+test("per-interface ingress-control counters are published when the interface reports them", async () => {
+  const mockIdentity = {
+    identityHash: Buffer.from("0123456789abcdef0123456789abcdef", "hex"),
+  };
+  const reporting = {
+    name: "tcp-client-1",
+    constructor: { name: "TCPClient" },
+    online: true,
+    bitrate: 1000000,
+    rxb: 1,
+    txb: 2,
+    getStats() {
+      return {
+        announceBurstActive: true,
+        announceBurstCount: 3,
+        heldAnnounces: 12,
+        prBurstActive: false,
+        prBurstCount: 1,
+        prBurstDrops: 7,
+        protocolViolations: 4,
+        packetFilterHits: 9,
+      };
+    },
+  };
+  const plain = {
+    name: "lora-node",
+    constructor: { name: "RNodeInterface" },
+    online: false,
+    bitrate: 9600,
+    rxb: 0,
+    txb: 0,
+  };
+  const mockRns = {
+    transport: {
+      interfaces: new Set([reporting, plain]),
+      activeLinks: new Map(),
+      routingTable: { routes: new Map() },
+    },
+  };
+
+  const values = await formatStatusValues(
+    mockRns,
+    null,
+    null,
+    null,
+    null,
+    null,
+    mockIdentity,
+    "Test Node",
+  );
+
+  // Every ingress counter of the reporting interface becomes a Signal K path
+  const burst = values.find(
+    (v) =>
+      v.path ===
+      "communication.reticulum.interfaces.tcp_client_1.announceBurstActive",
+  );
+  assert.equal(burst.value, true);
+  const held = values.find(
+    (v) =>
+      v.path ===
+      "communication.reticulum.interfaces.tcp_client_1.heldAnnounces",
+  );
+  assert.equal(held.value, 12);
+  const prDrops = values.find(
+    (v) =>
+      v.path === "communication.reticulum.interfaces.tcp_client_1.prBurstDrops",
+  );
+  assert.equal(prDrops.value, 7);
+  const violations = values.find(
+    (v) =>
+      v.path ===
+      "communication.reticulum.interfaces.tcp_client_1.protocolViolations",
+  );
+  assert.equal(violations.value, 4);
+  const filterHits = values.find(
+    (v) =>
+      v.path ===
+      "communication.reticulum.interfaces.tcp_client_1.packetFilterHits",
+  );
+  assert.equal(filterHits.value, 9);
+
+  // ...and is included in the interfaces array value for dashboards
+  const interfaces = values.find(
+    (v) => v.path === "communication.reticulum.interfaces",
+  );
+  const reportingEntry = interfaces.value.find((i) => i.id === "tcp_client_1");
+  assert.deepEqual(reportingEntry.ingressControl, {
+    announceBurstActive: true,
+    announceBurstCount: 3,
+    heldAnnounces: 12,
+    prBurstActive: false,
+    prBurstCount: 1,
+    prBurstDrops: 7,
+    protocolViolations: 4,
+    packetFilterHits: 9,
+  });
+
+  // Interfaces without getStats() (ad-hoc fakes) publish no ingress paths
+  const loraPaths = values.filter((v) =>
+    v.path.startsWith("communication.reticulum.interfaces.lora_node."),
+  );
+  assert.ok(
+    loraPaths.every((v) => !v.path.includes("announceBurst")),
+    "no ingress paths for an interface without getStats()",
+  );
+  const loraEntry = interfaces.value.find((i) => i.id === "lora_node");
+  assert.equal(loraEntry.ingressControl, undefined);
+});
