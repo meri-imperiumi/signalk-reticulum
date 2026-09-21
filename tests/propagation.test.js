@@ -541,14 +541,14 @@ async function deliveryHashFor(identity) {
 }
 
 /**
- * Seeds `Destination.recall` for a recipient so `_packForPropagationSubmit`
+ * Seeds the transport identity cache for a recipient so
+ * `_packForPropagationSubmit`
  * (which recalls the recipient identity to encrypt to it) succeeds in a test
  * where the recipient has never announced over the mesh.
  */
-async function rememberRecipient(identity, deliveryHash) {
-  const { Destination } = require("@reticulum/core");
+async function rememberRecipient(rns, identity, deliveryHash) {
   const pub = await identity.getPublicKey();
-  await Destination.remember(deliveryHash, deliveryHash, pub, null);
+  await rns.transport.rememberIdentity(deliveryHash, deliveryHash, pub, null);
 }
 
 test("submitToEmbeddedNode stores a message addressed to a remote recipient", async () => {
@@ -557,7 +557,7 @@ test("submitToEmbeddedNode stores a message addressed to a remote recipient", as
     // A second identity plays the remote recipient.
     const recipient = await Identity.generate();
     const recipientHash = await deliveryHashFor(recipient);
-    await rememberRecipient(recipient, recipientHash);
+    await rememberRecipient(rns, recipient, recipientHash);
 
     const { LXMessage } = require("@reticulum/lxmf");
     const message = new LXMessage({
@@ -599,7 +599,7 @@ test("submitToEmbeddedNode auto-delivers a message addressed to this node", asyn
     // node's own delivery hash — they are NOT stored.
     assert.equal(node.store.size, 0);
     // Seed our own delivery identity so _packForPropagationSubmit can recall it.
-    await rememberRecipient(identity, router.deliveryDest.destinationHash);
+    await rememberRecipient(rns, identity, router.deliveryDest.destinationHash);
     await submitToEmbeddedNode(router, node, message, identity);
     assert.equal(node.store.size, 0, "not stored — auto-delivered");
     assert.equal(received.length, 1, "message dispatched via event");
@@ -614,8 +614,11 @@ test("makeEmbeddedPropagationDeliverer submits via the embedded node", async () 
   try {
     const recipient = await Identity.generate();
     const recipientHashHex = toHex(await deliveryHashFor(recipient));
-    await rememberRecipient(recipient, Buffer.from(recipientHashHex, "hex"));
-
+    await rememberRecipient(
+      rns,
+      recipient,
+      Buffer.from(recipientHashHex, "hex"),
+    );
     const deliver = makeEmbeddedPropagationDeliverer(
       router,
       node,
@@ -635,8 +638,11 @@ test("makeAutoDeliverer uses the embedded fallback only when no path is known", 
   try {
     const recipient = await Identity.generate();
     const recipientHashHex = toHex(await deliveryHashFor(recipient));
-    await rememberRecipient(recipient, Buffer.from(recipientHashHex, "hex"));
-
+    await rememberRecipient(
+      rns,
+      recipient,
+      Buffer.from(recipientHashHex, "hex"),
+    );
     const directCalls = [];
     const directDeliver = async (hashHex) => {
       directCalls.push(hashHex);
@@ -678,7 +684,11 @@ test("makeEmbeddedPropagationDeliverer submits a prebuilt LXMessage as-is", asyn
   try {
     const recipient = await Identity.generate();
     const recipientHashHex = toHex(await deliveryHashFor(recipient));
-    await rememberRecipient(recipient, Buffer.from(recipientHashHex, "hex"));
+    await rememberRecipient(
+      rns,
+      recipient,
+      Buffer.from(recipientHashHex, "hex"),
+    );
 
     // Record what the packing step was handed: the prebuilt instance must be
     // packed and ingested untouched, so the stored copy shares the message id

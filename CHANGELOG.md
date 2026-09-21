@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+### Changed
+- Updated `@reticulum` dependencies to **0.9.0**, the release that fixes the **split-brain / singleton issue behind the 0.6.0 field failure** (LXMF client receives nothing while announces are ingested): identity, ratchet and proof-receipt caches are now instance-scoped on the `Reticulum` transport (`rns.transport.recallIdentity(…)`, `rememberIdentity`, `recallRatchet`, …) instead of `Destination` / `PacketReceipt` class statics, so a fragmented npm install (two physical `@reticulum/core` copies, e.g. from successive targeted plugin installs) can no longer end up with the plugin's transport and the LXMF router reading divergent, forever-empty static maps — and the dependent packages now self-warn (`warnIfFragmented`) when bundled against a different core copy. Migrated the plugin's cache lookups to the instance APIs (inbound LXMF diagnostics in `index.js` and `messaging.js` no longer use the removed `Destination.recall` static; tests seed and inspect the transport cache through the owning `Reticulum` instance). Other 0.9.0 changes picked up: interface MTU autoconfiguration (`optimiseMtu`), resource responses with metadata, multi-segment (split) Resources for payloads over 1 MiB, LXMF router construction now warns on fragmented installs, and the new `BackboneInterface` / `BackboneClientInterface` in `@reticulum/node` (available to the interface config, not enabled by the plugin)
 
 ## [0.6.1] - 2026-09-20
 ### Added

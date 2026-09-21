@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { Reticulum, Identity, Destination, toHex } = require("@reticulum/core");
+const { Reticulum, Identity, toHex } = require("@reticulum/core");
 const { setupMessaging, makeDeliverer } = require("../plugin/messaging");
 const commands = require("../plugin/commands");
 
@@ -114,7 +114,10 @@ test("setupMessaging keeps a ratchet and an opportunistic inbound message decryp
 
     // B must have learned A's ratchet from the announce — the exact key A
     // holds, so the opportunistic packet B encrypts is one A can decrypt.
-    const learned = Destination.recallRatchet(
+    // (The cache is instance-scoped since @reticulum/core 0.9.0, so the
+    // lookup must go through B's transport, the instance that ingested the
+    // announce.)
+    const learned = rnsB.transport.recallRatchet(
       lxmA.deliveryDest.destinationHash,
     );
     assert.ok(

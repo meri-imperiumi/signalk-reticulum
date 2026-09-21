@@ -24,7 +24,6 @@ const { withAppearance } = require("./appearance");
 const deps = {
   LXMRouter,
   LXMessage,
-  Destination: RNS.Destination,
   FIELD_TELEMETRY: LXMFConstants.FIELD_TELEMETRY,
   FIELD_ICON_APPEARANCE: LXMFConstants.FIELD_ICON_APPEARANCE,
   fromHex: RNS.fromHex,
@@ -247,7 +246,7 @@ function attachInboundDiagnostics(lxmf, debug = () => {}) {
         plaintext,
         lxmf.deliveryDest.destinationHash,
       );
-      const known = await deps.Destination.recall(parsed.sourceHash);
+      const known = await lxmf.rns.transport.recallIdentity(parsed.sourceHash);
       debug(
         `Inbound LXMF data packet from ${deps.toHex(
           parsed.sourceHash || [],
