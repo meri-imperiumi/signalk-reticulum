@@ -1,8 +1,13 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { deps, setupMessaging, makeDeliverer, makeTelemetryDeliverer } =
-  require("../plugin/messaging");
+const {
+  deps,
+  setupMessaging,
+  makeDeliverer,
+  makeTelemetryDeliverer,
+  verifySender,
+} = require("../plugin/messaging");
 
 /** A fake LXMRouter that records init/announce/send calls. */
 class FakeLxmRouter {
@@ -459,4 +464,74 @@ test("makeDeliverer sends a prebuilt LXMessage as-is instead of building a new o
   );
 
   Object.assign(deps, REAL_DEPS);
+});
+
+// --- verifySender: the propagation-sync signature-verification gate ----------
+
+/** A minimal router/transport pair for the verifySender tests. */
+function makeVerifyRouter({ identity, requested = [] } = {}) {
+  return {
+    rns: {
+      transport: {
+        async recallIdentity() {
+          return identity ?? null;
+        },
+        async requestPath(hash) {
+          requested.push(Buffer.from(hash).toString("hex"));
+        },
+      },
+    },
+  };
+}
+
+test("verifySender returns verified when the signature checks out", async () => {
+  const lxmf = makeVerifyRouter({ identity: { identityHash: "abc" } });
+  const message = {
+    sourceHash: new Uint8Array(16).fill(3),
+    verifySignature: async () => true,
+  };
+  assert.equal(await verifySender(lxmf, message), "verified");
+});
+
+test("verifySender returns invalid when the signature fails cryptographic proof", async () => {
+  const lxmf = makeVerifyRouter({ identity: { identityHash: "abc" } });
+  const message = {
+    sourceHash: new Uint8Array(16).fill(3),
+    // A forged source hash: the attacker does not hold the sender's private
+    // key, so the signature does not check out.
+    verifySignature: async () => false,
+  };
+  assert.equal(await verifySender(lxmf, message), "invalid");
+});
+
+test("verifySender returns unknown and solicits the sender's path when the identity is not recalled", async () => {
+  const requested = [];
+  const lxmf = makeVerifyRouter({ requested });
+  const message = {
+    sourceHash: new Uint8Array(16).fill(3),
+    verifySignature: async () => true,
+  };
+  assert.equal(await verifySender(lxmf, message), "unknown");
+  assert.deepEqual(
+    requested,
+    [Buffer.from(new Uint8Array(16).fill(3)).toString("hex")],
+    "a path/announce was requested for the unknown sender",
+  );
+});
+
+test("verifySender tolerates a transport without requestPath", async () => {
+  const lxmf = {
+    rns: {
+      transport: {
+        async recallIdentity() {
+          return null;
+        },
+      },
+    },
+  };
+  const message = {
+    sourceHash: new Uint8Array(16).fill(3),
+    verifySignature: async () => true,
+  };
+  assert.equal(await verifySender(lxmf, message), "unknown");
 });

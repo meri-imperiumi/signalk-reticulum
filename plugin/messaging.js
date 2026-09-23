@@ -291,10 +291,52 @@ function attachInboundDiagnostics(lxmf, debug = () => {}) {
   };
 }
 
+/**
+ * Verifies the signature of an inbound LXMF message against the sender's
+ * recalled identity, closing the propagation-sync verification gap.
+ *
+ * The router signature-verifies on the direct-delivery path (it parks a
+ * message until the sender's identity is known, then checks the signature
+ * before dispatching), but a message pulled in via a propagation-node sync —
+ * or ingested from a paper `lxm://` URI — is dispatched *without* verification
+ * when the sender's identity is not yet recalled (mirroring Python's
+ * `SOURCE_UNKNOWN` handling). A source-hash check alone is forgeable on those
+ * paths (a 16-byte hash, no private key needed), so callers must not rely on
+ * the router for this: a message is admitted only when this returns
+ * `"verified"`.
+ *
+ * @param {object} lxmf - An initialised LXMRouter.
+ * @param {object} message - The inbound LXMessage.
+ * @returns {Promise<"verified"|"unknown"|"invalid">}
+ *   `"verified"` — signature checks against the recalled sender identity.
+ *   `"unknown"`   — sender identity not recalled yet; a path/announce is
+ *                  requested so later copies can be verified, but this copy
+ *                  must be treated as unverified.
+ *   `"invalid"`   — signature failed cryptographic proof.
+ */
+async function verifySender(lxmf, message) {
+  const sender = await lxmf.rns.transport.recallIdentity(message.sourceHash);
+  if (!sender) {
+    // Solicit the sender's announce (the same request the router makes for a
+    // parked direct message), so the identity lands and a later copy of this
+    // message — a retry, or another sync — verifies.
+    try {
+      if (typeof lxmf.rns.transport.requestPath === "function") {
+        await lxmf.rns.transport.requestPath(message.sourceHash);
+      }
+    } catch {
+      /* best effort */
+    }
+    return "unknown";
+  }
+  return (await message.verifySignature(sender)) ? "verified" : "invalid";
+}
+
 module.exports = {
   deps,
   setupMessaging,
   makeDeliverer,
   makeTelemetryDeliverer,
   attachInboundDiagnostics,
+  verifySender,
 };

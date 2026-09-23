@@ -56,6 +56,25 @@ class FakeRns {
     // Defaults to true so direct delivery is used unless a test records a
     // destination as unreachable via `rns.transport._unreachable`.
     this.transport._unreachable = new Set();
+    // Identity recall: the real transport recalls a sender's identity from a
+    // prior announce. Tests can pre-populate `_identities` (hex → identity-
+    // like object); by default every hash recalls a generic identity, so a
+    // dispatched fake message stands for one the router already verified on
+    // the direct-delivery path.
+    this.transport._identities = new Map();
+    this.transport.recallIdentity = async (hash) => {
+      const hex =
+        hash instanceof Uint8Array ? Buffer.from(hash).toString("hex") : hash;
+      return this.transport._identities.get(hex) ?? { identityHash: hash };
+    };
+    // Records requested paths so signature-verification tests can assert a
+    // path/announce was solicited for an unknown sender.
+    this.transport.requestedPaths = [];
+    this.transport.requestPath = async (hash) => {
+      this.transport.requestedPaths.push(
+        hash instanceof Uint8Array ? Buffer.from(hash).toString("hex") : hash,
+      );
+    };
     this.transport.hasPath = (hash) => {
       const hex =
         hash instanceof Uint8Array ? Buffer.from(hash).toString("hex") : hash;
@@ -310,6 +329,13 @@ class FakeBZip2 {
 
 compression.deps.BZip2 = FakeBZip2;
 
+/** Wraps a fake inbound message so it passes signature verification,
+ * standing for one the router already verified on the direct-delivery path.
+ * Tests of the verification gate itself override `verifySignature`. */
+function verified(message) {
+  return { verifySignature: async () => true, ...message };
+}
+
 /** Minimal stand-in for the Signal K ServerAPI the plugin touches. */
 function makeApp() {
   /** @type {any} */
@@ -320,6 +346,9 @@ function makeApp() {
     savedOptions: [],
     debug(...args) {
       app.debugCalls.push(args);
+    },
+    error(...args) {
+      app.errorCalls.push(args.join(" "));
     },
     setPluginStatus(msg) {
       app.statusCalls.push(msg);
@@ -1189,7 +1218,7 @@ test('an incoming "ping" LXMF message is answered with "Pong"', async () => {
   const source = new Uint8Array(16).fill(4);
   router.dispatchEvent(
     new CustomEvent("message", {
-      detail: { message: { sourceHash: source, content: "ping" } },
+      detail: { message: verified({ sourceHash: source, content: "ping" }) },
     }),
   );
   // The reply is async; let it flush.
@@ -1212,7 +1241,7 @@ test('an incoming "ping" that arrived over a Link is replied over that same link
   router.dispatchEvent(
     new CustomEvent("message", {
       detail: {
-        message: { sourceHash: source, content: "ping" },
+        message: verified({ sourceHash: source, content: "ping" }),
         link: linkId,
       },
     }),
@@ -1240,25 +1269,25 @@ test("a duplicate inbound command (second delivery path or retry) is handled onc
   const dispatch = (detail) =>
     router.dispatchEvent(new CustomEvent("message", { detail }));
   dispatch({
-    message: {
+    message: verified({
       sourceHash: new Uint8Array(16).fill(4),
       content: "ping",
       messageId,
-    },
+    }),
   });
   dispatch({
-    message: {
+    message: verified({
       sourceHash: new Uint8Array(16).fill(4),
       content: "ping",
       messageId,
-    },
+    }),
   });
   dispatch({
-    message: {
+    message: verified({
       sourceHash: new Uint8Array(16).fill(4),
       content: "ping",
       messageId,
-    },
+    }),
   });
   await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -1266,11 +1295,11 @@ test("a duplicate inbound command (second delivery path or retry) is handled onc
 
   // A *different* message (fresh id) is new traffic and gets its reply.
   dispatch({
-    message: {
+    message: verified({
       sourceHash: new Uint8Array(16).fill(4),
       content: "ping",
       messageId: new Uint8Array(32).fill(6),
-    },
+    }),
   });
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(router.sent.length, 2, "a distinct message id is handled");
@@ -1300,11 +1329,11 @@ test("a digital switching command delivered over two paths switches once and rep
     router.dispatchEvent(
       new CustomEvent("message", {
         detail: {
-          message: {
+          message: verified({
             sourceHash: source,
             content: "Turn cockpitLight off",
             messageId,
-          },
+          }),
           link,
         },
       }),
@@ -1323,6 +1352,93 @@ test("a digital switching command delivered over two paths switches once and rep
   );
 });
 
+test("an unverified message (propagation-synced, unknown sender) is dropped and a path requested", async () => {
+  const app = makeApp();
+  const puts = [];
+  app.putSelfPath = (path, value, cb) => {
+    puts.push({ path, value });
+    setImmediate(cb, { state: "COMPLETED", statusCode: 200 });
+  };
+  const plugin = makePlugin(app);
+  const identityHash = "7a3c9f1b2e4d58607a3c9f1b2e4d5860";
+  const source = Buffer.from(deriveLxmfDestinationHash(identityHash), "hex");
+  await plugin.start({
+    messaging: { digital_switching: true },
+    crew: [{ name: "Alice", identity: identityHash }],
+  });
+  const router = plugin.lxmf;
+  // The sender's identity was never learned from an announce (the gap in a
+  // propagation sync before the crew's announce has been heard).
+  plugin.rns.transport.recallIdentity = async () => null;
+  plugin.rns.transport.requestedPaths.length = 0;
+
+  // A switching command claiming to come from the crew, but with no
+  // cryptographic proof available.
+  router.dispatchEvent(
+    new CustomEvent("message", {
+      detail: {
+        message: verified({
+          sourceHash: source,
+          content: "Turn cockpitLight on",
+          messageId: new Uint8Array(32).fill(1),
+        }),
+      },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(puts.length, 0, "the switch is not written");
+  assert.equal(router.sent.length, 0, "no reply is sent");
+  assert.deepEqual(
+    plugin.rns.transport.requestedPaths,
+    [Buffer.from(source).toString("hex")],
+    "a path/announce was requested for the unknown sender",
+  );
+  await plugin.stop();
+});
+
+test("a forged crew message (invalid signature) is dropped as a possible forgery", async () => {
+  const app = makeApp();
+  const puts = [];
+  app.putSelfPath = (path, value, cb) => {
+    puts.push({ path, value });
+    setImmediate(cb, { state: "COMPLETED", statusCode: 200 });
+  };
+  const plugin = makePlugin(app);
+  const identityHash = "7a3c9f1b2e4d58607a3c9f1b2e4d5860";
+  const source = Buffer.from(deriveLxmfDestinationHash(identityHash), "hex");
+  await plugin.start({
+    messaging: { digital_switching: true },
+    crew: [{ name: "Alice", identity: identityHash }],
+  });
+  const router = plugin.lxmf;
+
+  // The attacker knows Alice's destination hash (public via announces) and
+  // forges it as the source, but does not hold her private key — the
+  // signature cannot check out.
+  router.dispatchEvent(
+    new CustomEvent("message", {
+      detail: {
+        message: {
+          sourceHash: source,
+          content: "Turn cockpitLight on",
+          messageId: new Uint8Array(32).fill(2),
+          verifySignature: async () => false,
+        },
+      },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(puts.length, 0, "the switch is not written");
+  assert.equal(router.sent.length, 0, "no reply is sent");
+  assert.ok(
+    app.errorCalls.some((c) => /signature invalid/.test(c)),
+    "the forgery is logged as an error",
+  );
+  await plugin.stop();
+});
+
 test("an unmatched LXMF message does not trigger a reply", async () => {
   const app = makeApp();
   const plugin = makePlugin(app);
@@ -1332,7 +1448,10 @@ test("an unmatched LXMF message does not trigger a reply", async () => {
   router.dispatchEvent(
     new CustomEvent("message", {
       detail: {
-        message: { sourceHash: new Uint8Array(16).fill(4), content: "hello" },
+        message: verified({
+          sourceHash: new Uint8Array(16).fill(4),
+          content: "hello",
+        }),
       },
     }),
   );
@@ -1364,7 +1483,7 @@ test("an inbound crew telemetry snapshot populates Signal K when enabled", async
   router.dispatchEvent(
     new CustomEvent("message", {
       detail: {
-        message: {
+        message: verified({
           sourceHash: Buffer.from(lxmfHash, "hex"),
           fields: crewTelemetryFields({
             latitude: 60.1,
@@ -1372,7 +1491,7 @@ test("an inbound crew telemetry snapshot populates Signal K when enabled", async
             batteryPercent: 80,
             now: 1700000000,
           }),
-        },
+        }),
       },
     }),
   );
@@ -1416,14 +1535,14 @@ test("inbound crew telemetry is dropped when the setting is off", async () => {
   plugin.lxmf.dispatchEvent(
     new CustomEvent("message", {
       detail: {
-        message: {
+        message: verified({
           sourceHash: Buffer.from(lxmfHash, "hex"),
           fields: crewTelemetryFields({
             latitude: 1,
             longitude: 2,
             now: 1,
           }),
-        },
+        }),
       },
     }),
   );
@@ -1446,11 +1565,11 @@ test("inbound telemetry from a non-crew sender is dropped", async () => {
   plugin.lxmf.dispatchEvent(
     new CustomEvent("message", {
       detail: {
-        message: {
+        message: verified({
           // A source hash that does NOT match any configured crew member.
           sourceHash: new Uint8Array(16).fill(4),
           fields: crewTelemetryFields({ latitude: 1, longitude: 2, now: 1 }),
-        },
+        }),
       },
     }),
   );

@@ -20,8 +20,12 @@ const { resolveIdentity } = require("./identity");
 const { effectiveInterfaces, setupInterfaces, interfacesFromConfig } =
   require("./interfaces");
 const { sendNotification, sweepNotifications } = require("./notifications");
-const { setupMessaging, makeDeliverer, makeTelemetryDeliverer } =
-  require("./messaging");
+const {
+  setupMessaging,
+  makeDeliverer,
+  makeTelemetryDeliverer,
+  verifySender,
+} = require("./messaging");
 const { setupNomadNet } = require("./nomadnet");
 const { readNumber, readPosition, readString } = require("./nomadnet");
 const compression = require("./compression");
@@ -790,6 +794,42 @@ module.exports = (app) => {
                 `Duplicate LXMF message ${inboundKey} ignored ` +
                   "(already handled via another delivery path or a retry)",
               );
+              return;
+            }
+            // A message pulled in via a propagation-node sync (or a paper
+            // URI) is dispatched by the router WITHOUT signature verification
+            // when the sender's identity is not yet recalled, so the crew
+            // source-hash match alone is forgeable on that path (a 16-byte
+            // hash, no private key needed). Re-verify the signature here
+            // regardless of delivery path and drop anything that isn't
+            // cryptographically proven to be the sender's.
+            let proof;
+            try {
+              proof = await verifySender(plugin.lxmf, message);
+            } catch (e) {
+              // Fail closed: if verification itself cannot run, the message
+              // is not cryptographically proven, so it is dropped.
+              app.debug(
+                `Dropping LXMF message from ${toHex(
+                  message.sourceHash || [],
+                )}: signature verification failed: ${e.message}`,
+              );
+              return;
+            }
+            if (proof !== "verified") {
+              const sourceHex = toHex(message.sourceHash || []);
+              if (proof === "invalid") {
+                app.error(
+                  `Dropping LXMF message from ${sourceHex}: signature ` +
+                    "invalid (possible forgery)",
+                );
+              } else {
+                app.debug(
+                  `Dropping LXMF message from ${sourceHex}: sender ` +
+                    "identity unknown, signature unverified (requested " +
+                    "path; a later copy will be verified)",
+                );
+              }
               return;
             }
             // Populate Signal K from any telemetry snapshot a crew member's
