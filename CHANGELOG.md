@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.6.3] - 2026-09-23
 ### Security
 - **Inbound LXMF messages are now signature-verified before they are handled, closing a forgery gap on the propagation-sync path.** The router signature-verifies on the direct-delivery path (parking a message until the sender's identity is known), but a message pulled in via a propagation-node sync — or ingested from a paper `lxm://` URI, or delivered in-process by the embedded propagation node — is dispatched *without* verification when the sender's identity is not yet recalled. On those paths the crew source-hash match alone was forgeable (a 16-byte hash, no private key needed): anyone who had heard a crew member's announce could craft an LXMF message claiming their `lxmf.delivery` hash as the source and toggle digital switches or inject fake crew telemetry (position, battery) into Signal K. Every inbound message is now re-verified against the sender's recalled identity (`verifySender` in `plugin/messaging.js`) regardless of delivery path; anything not cryptographically proven is dropped — an *invalid* signature is logged as a possible forgery, and an *unknown* sender triggers a path/announce request (mirroring the router's parked-message handling) so a later copy of the message verifies. Direct-delivery traffic is unaffected (already verified by the router); genuine synced messages are picked up once the sender's announce has been ingested
 
