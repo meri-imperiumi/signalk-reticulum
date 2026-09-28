@@ -26,7 +26,7 @@
   "homepage": "https://github.com/meri-imperiumi/signalk-reticulum#readme",
   "signalk-plugin-enabled-by-default": false,
   "signalk": {
-    "appIcon": "./doc/signalk-reticulum.png",
+    "appIcon": "./doc/signalk-reticulum-256.png",
     "displayName": "Reticulum Network",
     "screenshots": [
       "./doc/alerts.png",
