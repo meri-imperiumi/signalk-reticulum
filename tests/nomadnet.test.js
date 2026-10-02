@@ -5,6 +5,8 @@ const {
   deps,
   setupNomadNet,
   renderPage,
+  telemetryLines,
+  telemetryContext,
   formatRequestLog,
   readNumber,
   formatVesselState,
@@ -217,6 +219,95 @@ test("formatBattery converts SoC to percent and shows current", () => {
   assert.equal(formatBattery(0.5, undefined), "Battery: 50 %");
   assert.equal(formatBattery(undefined, -1.2), "Battery: -1.2 A");
   assert.equal(formatBattery(undefined, undefined), "");
+});
+
+// --- shared telemetry lines (page body & Status command reply) --------------
+
+test("telemetryLines renders one line per available reading, in page order", () => {
+  assert.deepEqual(
+    telemetryLines({
+      state: { value: "sailing" },
+      position: { value: { latitude: 60.1234, longitude: 21.5678 } },
+      anchorDistance: { value: 12.56 },
+      depth: { value: 5.24 },
+      tideHeight: { value: 1.3 },
+      tideState: "rising",
+      windSpeed: { value: 6 },
+      windDirection: { value: Math.PI / 4 },
+      batterySoc: { value: 0.873 },
+      batteryCurrent: { value: 2.3 },
+    }),
+    [
+      "Vessel is sailing",
+      "Position: 60\u00B007.404' N, 021\u00B034.068' E",
+      "Anchor: 12.6 m from bow",
+      "Depth: 5.2 m below surface",
+      "Tide: 1.3 m, rising",
+      "Wind: 12 kn from 45\u00B0",
+      "Battery: 87 %, 2.3 A",
+    ],
+  );
+});
+
+test("telemetryLines omits absent readings entirely", () => {
+  assert.deepEqual(telemetryLines({ depth: { value: 5.24 } }), [
+    "Depth: 5.2 m below surface",
+  ]);
+  assert.deepEqual(telemetryLines({}), []);
+  assert.deepEqual(telemetryLines(undefined), []);
+});
+
+test("telemetryLines is exactly what the micron page renders as its body", () => {
+  const telemetry = {
+    state: "anchored",
+    depth: { value: 5.24 },
+    windSpeed: { value: 6 },
+  };
+  const page = renderPage({ vesselName: "Boat", telemetry });
+  assert.deepEqual(
+    page
+      .split("\n")
+      .filter((line) => line && !line.startsWith(">") && line !== "Boat"),
+    telemetryLines(telemetry),
+  );
+});
+
+test("telemetryContext reads the same self paths the page context used to", () => {
+  const reads = [];
+  const app = {
+    getSelfPath: (path) => {
+      reads.push(path);
+      return path === "navigation.state" ? { value: "moored" } : undefined;
+    },
+  };
+  const context = telemetryContext(app);
+  assert.deepEqual(reads, [
+    "navigation.state",
+    "navigation.position",
+    "navigation.anchor.distanceFromBow",
+    "environment.depth.belowSurface",
+    "environment.tide.heightNow",
+    "environment.tide.state",
+    "environment.wind.speedOverGround",
+    "environment.wind.directionTrue",
+    "electrical.batteries.house.capacity.stateOfCharge",
+    "electrical.batteries.house.current",
+  ]);
+  assert.deepEqual(context.state, { value: "moored" });
+  assert.equal(context.depth, undefined);
+});
+
+test("telemetryContext tolerates an app without getSelfPath", () => {
+  const allUndefined = (context) =>
+    Object.values(context).every((value) => value === undefined);
+  assert.equal(allUndefined(telemetryContext(undefined)), true);
+  assert.equal(allUndefined(telemetryContext({})), true);
+  const throwing = {
+    getSelfPath: () => {
+      throw new Error("boom");
+    },
+  };
+  assert.equal(allUndefined(telemetryContext(throwing)), true);
 });
 
 // --- banner & telemetry rendering ------------------------------------------

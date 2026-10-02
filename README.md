@@ -99,6 +99,7 @@ The node listens for incoming LXMF messages and dispatches them to text commands
 | Command | Crew only | Description |
 | --- | --- | --- |
 | `ping` | no | Replies `Pong`, so any peer can check the node is reachable. |
+| `status` | no | Replies with the boat's current readings — the same lines the NomadNet index page serves (state, position, anchor, depth, tide, wind, house battery) — in a single LXMF message. Readings the server does not report are omitted; with no readings at all the reply says so. |
 | `turn <switch> on` / `turn <switch> off` | yes | Toggles a Signal K digital switch (`electrical.switches.<switch>.state`; dotted names address nested switches, e.g. Cerbo GX relays) and replies to confirm. Requires the **Allow crew to toggle digital switches** setting. |
 
 Replies are sent back to the sender's `lxmf.delivery` destination, riding the arrival link when one exists, and falling back to store-and-forward when it is enabled.

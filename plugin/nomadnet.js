@@ -239,6 +239,74 @@ function formatBattery(stateOfCharge, current) {
 }
 
 /**
+ * Renders the vessel-status body lines — state, position, anchor, depth,
+ * tide, wind, house battery — one plain line per available reading, absent
+ * readings omitted so neither the NomadNet page nor a Status command reply
+ * ever shows empty placeholders.
+ *
+ * This is the single source of truth for "the vessel data we publish": the
+ * micron page renders these lines under its "Vessel status" header, and the
+ * LXMF Status command (commands/status.js) replies with exactly the same
+ * lines, so the two views cannot drift apart.
+ *
+ * @param {object} [telemetry] - Raw Signal K self-path values, as built by
+ *   {@link telemetryContext}. The `position` key takes the
+ *   `navigation.position` object (`{latitude, longitude}`, optionally
+ *   `{value}` wrapped).
+ * @returns {string[]} The non-empty formatted lines.
+ */
+function telemetryLines(telemetry = {}) {
+  const tel = telemetry || {};
+  return [
+    formatVesselState(tel.state),
+    formatPosition(tel.position),
+    formatAnchorDistance(tel.anchorDistance),
+    formatDepth(tel.depth),
+    formatTide(tel.tideHeight, tel.tideState),
+    formatWind(tel.windSpeed, tel.windDirection),
+    formatBattery(tel.batterySoc, tel.batteryCurrent),
+  ].filter((line) => line && line.trim() !== "");
+}
+
+/**
+ * Reads the boat's current telemetry from Signal K — the exact keys the
+ * NomadNet index page renders — into the raw-value object
+ * {@link telemetryLines} formats. Each entry is the untouched `getSelfPath`
+ * result (plain value or `{value}` update wrapper); the formatters unwrap and
+ * coerce from there, and drop anything missing or non-numeric.
+ *
+ * Tolerates servers (and test fakes) that do not expose `getSelfPath` by
+ * returning all-`undefined` readings, which render as no lines at all.
+ *
+ * @param {{getSelfPath?: (path: string) => unknown}|null|undefined} app
+ * @returns {object} Raw telemetry keyed for {@link telemetryLines}.
+ */
+function telemetryContext(app) {
+  const read = (path) => {
+    if (!app || typeof app.getSelfPath !== "function") {
+      return undefined;
+    }
+    try {
+      return app.getSelfPath(path);
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    state: read("navigation.state"),
+    position: read("navigation.position"),
+    anchorDistance: read("navigation.anchor.distanceFromBow"),
+    depth: read("environment.depth.belowSurface"),
+    tideHeight: read("environment.tide.heightNow"),
+    tideState: read("environment.tide.state"),
+    windSpeed: read("environment.wind.speedOverGround"),
+    windDirection: read("environment.wind.directionTrue"),
+    batterySoc: read("electrical.batteries.house.capacity.stateOfCharge"),
+    batteryCurrent: read("electrical.batteries.house.current"),
+  };
+}
+
+/**
  * Renders the `/page/index.mu` micron page for the given context.
  *
  * The page starts with a banner: a configurable ASCII/micron banner when
@@ -268,16 +336,7 @@ function renderPage(context = {}) {
   const name = readString(cfg.vesselName) || UNKNOWN_VESSEL;
   lines.push(banner ? banner : `>>${name}`);
 
-  const tel = cfg.telemetry || {};
-  const body = [
-    formatVesselState(tel.state),
-    formatPosition(tel.position),
-    formatAnchorDistance(tel.anchorDistance),
-    formatDepth(tel.depth),
-    formatTide(tel.tideHeight, tel.tideState),
-    formatWind(tel.windSpeed, tel.windDirection),
-    formatBattery(tel.batterySoc, tel.batteryCurrent),
-  ].filter((line) => line && line.trim() !== "");
+  const body = telemetryLines(cfg.telemetry);
 
   if (body.length) {
     lines.push("");
@@ -542,6 +601,8 @@ module.exports = {
   TELEMETRY_SECTION,
   setupNomadNet,
   renderPage,
+  telemetryLines,
+  telemetryContext,
   formatRequestLog,
   readString,
   readNumber,

@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+### Added
+- **`Status` command**: a "Status" LXMF message now gets a reply with the boat's current readings — navigation state, position, anchor distance, depth, tide, wind and house battery — the same lines the NomadNet index page renders under its "Vessel status" section, produced by the same shared formatters (`telemetryLines`/`telemetryContext` in `plugin/nomadnet.js`, which the page context also uses now) so the browsed page and the mesh reply can never drift apart. The vessel name is not included, as the sender already sees it as the destination's announced display name, and the report goes out as a single message — LXMF has no radio-packet size limit, so unlike `signalk-meshtastic` no splitting across messages is needed. Readings the server does not report are omitted; with none at all the reply says "No telemetry available". Available to everyone (not crew-only), like ping. Covered by `tests/status-command.test.js` and the shared-renderer tests in `tests/nomadnet.test.js`
 
 ## [0.6.3] - 2026-09-23
 ### Security

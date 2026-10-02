@@ -27,7 +27,12 @@ const {
   verifySender,
 } = require("./messaging");
 const { setupNomadNet } = require("./nomadnet");
-const { readNumber, readPosition, readString } = require("./nomadnet");
+const {
+  readNumber,
+  readPosition,
+  readString,
+  telemetryContext,
+} = require("./nomadnet");
 const compression = require("./compression");
 const { resolveDisplayName } = require("./displayname");
 const { resolveAppearance } = require("./appearance");
@@ -1634,33 +1639,9 @@ module.exports = (app) => {
                   vesselName: readSelf(app, "name"),
                   banner: config.nomadnet && config.nomadnet.banner,
                   footer: config.nomadnet && config.nomadnet.footer,
-                  telemetry: {
-                    state: readSelf(app, "navigation.state"),
-                    position: readSelf(app, "navigation.position"),
-                    anchorDistance: readSelf(
-                      app,
-                      "navigation.anchor.distanceFromBow",
-                    ),
-                    depth: readSelf(app, "environment.depth.belowSurface"),
-                    tideHeight: readSelf(app, "environment.tide.heightNow"),
-                    tideState: readSelf(app, "environment.tide.state"),
-                    windSpeed: readSelf(
-                      app,
-                      "environment.wind.speedOverGround",
-                    ),
-                    windDirection: readSelf(
-                      app,
-                      "environment.wind.directionTrue",
-                    ),
-                    batterySoc: readSelf(
-                      app,
-                      "electrical.batteries.house.capacity.stateOfCharge",
-                    ),
-                    batteryCurrent: readSelf(
-                      app,
-                      "electrical.batteries.house.current",
-                    ),
-                  },
+                  // Shared with the LXMF Status command, so the browsed page
+                  // and the mesh reply always agree
+                  telemetry: telemetryContext(app),
                 }),
               },
               app.debug,
