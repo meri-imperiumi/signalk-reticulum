@@ -104,22 +104,24 @@ async function setupMessaging(rns, identity, options = {}, log = () => {}) {
  * established Link (the prompt path the LXMF echobot uses). If that link send
  * fails — most importantly when a battery-conscious mobile client tears the
  * link down right after its own message is acknowledged, so the link is gone
- * by the time we reply — the reply falls back to opportunistic single-packet
- * delivery (LXMF.md §5.1). That is the same path telemetry and alerts already
- * use to reach these clients reliably, so a reply never goes missing just
- * because the arrival link did not stay open. Without a `linkId` (e.g.
- * notification forwarding, or an opportunistic inbound message) the reply is
- * sent opportunistically directly.
+ * by the time we reply — the router escalates to opportunistic single-packet
+ * delivery (LXMF.md §5.1, the `fallback: "opportunistic"` delivery ladder
+ * @reticulum/lxmf 0.9.3 automates in `LXMRouter.send`). That is the same path
+ * telemetry and alerts already use to reach these clients reliably, so a
+ * reply never goes missing just because the arrival link did not stay open.
+ * Without a `linkId` the router's default delivery ladder applies (establish
+ * a DIRECT link when possible, opportunistic fallback).
  *
  * One LXMessage identity per logical reply: the message is built once per
  * call (or taken from the optional `prebuilt` argument — see
- * {@link module:propagation~makeAutoDeliverer}) and the same object is re-sent
- * on the opportunistic fallback. Every wire copy of one reply therefore shares
- * one message id, so a client that deduplicates by message hash (Sideband,
- * Nomad Network) shows the reply once even when a fallback copy also arrives —
- * minting a fresh message per attempt would give each copy a distinct id and
- * turn every fallback into a visible duplicate. The sent message is returned
- * so wrapping deliverers can thread the same identity into their fallbacks.
+ * {@link module:propagation~makeAutoDeliverer}) and the same object is sent
+ * on every delivery attempt. Since @reticulum/lxmf 0.9.3 a `Message`
+ * guarantees a stable `messageId` (and timestamp) across repeated
+ * serialisations and delivery retries, so every wire copy of one reply shares
+ * one message id and a client that deduplicates by message hash (Sideband,
+ * Nomad Network) shows the reply once even when a fallback copy also arrives.
+ * The sent message is returned so wrapping deliverers can thread the same
+ * identity into their fallbacks.
  *
  * Rejects if the recipient's identity is unknown or delivery fails; the caller
  * (notification forwarding) logs and continues with the next recipient.
@@ -147,31 +149,22 @@ function makeDeliverer(lxmf, identity, debug = () => {}) {
         title,
         content,
       });
-    // Built once, re-sent as-is on the fallback below: both wire copies share
-    // one message id, so a deduplicating client renders the reply once.
+    // Built once and handed to the router: a Message keeps a stable messageId
+    // across delivery retries, so a deduplicating client renders the reply
+    // once even when the opportunistic fallback also arrives.
     const message = build();
-    try {
-      await lxmf.send(message, identity, linkId);
-      debug(
-        `LXMF message delivered to ${destinationHashHex}${
-          linkId ? " via the arrival link" : " (opportunistic)"
-        }`,
-      );
-    } catch (e) {
-      // No arrival link to fall back from — propagate the error.
-      if (!linkId) throw e;
-      // The link reply failed (typically the peer closed the link after its
-      // message was acknowledged). Retry as an opportunistic single packet —
-      // the delivery path telemetry/alerts already use to reach these peers.
-      // The same message object is re-sent so both copies share one id.
-      debug(
-        `LXMF link reply to ${destinationHashHex} failed (${e.message}); retrying opportunistic`,
-      );
-      await lxmf.send(message, identity, null);
-      debug(
-        `LXMF message delivered to ${destinationHashHex} (opportunistic fallback)`,
-      );
-    }
+    // The router tries the supplied arrival link first and escalates to an
+    // opportunistic single packet when the link send fails (typically the
+    // peer closed the link after its message was acknowledged).
+    await lxmf.send(message, identity, {
+      linkId: linkId ?? null,
+      fallback: "opportunistic",
+    });
+    debug(
+      `LXMF message delivered to ${destinationHashHex}${
+        linkId ? " via the arrival link (or its fallback)" : ""
+      }`,
+    );
     return message;
   };
 }

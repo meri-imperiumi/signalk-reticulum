@@ -113,6 +113,47 @@ const deps = {
 };
 
 /**
+ * Fires `fn` once the Reticulum node is ready — initial persistence hydration
+ * and background initialisation complete (`Reticulum.prototype.ready()`,
+ * @reticulum/core 0.9.3) — instead of guessing a fixed startup delay.
+ *
+ * A fixed fallback delay keeps the callback bounded: if readiness never
+ * resolves (e.g. a wedged persistor), `fn` still fires after `fallbackMs`,
+ * matching the fixed `setTimeout` delays this helper replaces. Returns a
+ * cancel function suitable for the plugin's `unsubscribes`.
+ *
+ * @param {object} rns - The Reticulum node instance.
+ * @param {() => void} fn - The initial kick (first sync/announce/telemetry send).
+ * @param {number} [fallbackMs=10000] - Fire regardless once this long.
+ * @returns {() => void} cancel — prevents the callback if it has not fired yet.
+ */
+function fireWhenReady(rns, fn, fallbackMs = 10000) {
+  let cancelled = false;
+  let fallbackTimer = setTimeout(() => {
+    fallbackTimer = null;
+    if (!cancelled) fn();
+  }, fallbackMs);
+  const fire = () => {
+    if (fallbackTimer) {
+      clearTimeout(fallbackTimer);
+      fallbackTimer = null;
+    }
+    if (!cancelled) fn();
+  };
+  // Defensive against test fakes and older cores without ready().
+  const readiness =
+    typeof (rns && rns.ready) === "function" ? rns.ready() : Promise.resolve();
+  readiness.then(fire, fire);
+  return () => {
+    cancelled = true;
+    if (fallbackTimer) {
+      clearTimeout(fallbackTimer);
+      fallbackTimer = null;
+    }
+  };
+}
+
+/**
  * Reads a `vessels.self` path from the Signal K app, tolerating servers (and
  * test fakes) that do not expose `getSelfPath`. Returns the raw value — a plain
  * string or a `{value}` wrapper — or `undefined`; {@link resolveDisplayName}
@@ -1210,13 +1251,16 @@ module.exports = (app) => {
                       app.debug(`RFed snapshot error: ${e.message}`);
                     }
                   };
-                  const initial = setTimeout(sendShipOnce, 5000);
+                  // Publish one snapshot once the node is ready (hydration,
+                  // interface discovery) so peers see us without waiting a
+                  // full interval.
+                  const cancelInitial = fireWhenReady(rns, sendShipOnce, 5000);
                   const timer = setInterval(
                     sendShipOnce,
                     rfedIntervalSec * 1000,
                   );
                   unsubscribes.push(() => {
-                    clearTimeout(initial);
+                    cancelInitial();
                     clearInterval(timer);
                   });
                 }
@@ -1436,13 +1480,14 @@ module.exports = (app) => {
               syncFromNode(plugin.lxmf, plugin.identity, app.debug).catch((e) =>
                 app.debug(`LXMF propagation sync error: ${e.message}`),
               );
-            // Sync shortly after start so messages stored while the node was
-            // offline are picked up without waiting a full interval, then on
-            // the recurring timer.
-            const initial = setTimeout(syncOnce, 5000);
+            // Sync once the node is ready (persistor hydration, interface
+            // discovery) so messages stored while the node was offline are
+            // picked up without waiting a full interval — and without racing
+            // a still-empty identity cache — then on the recurring timer.
+            const cancelInitialSync = fireWhenReady(rns, syncOnce, 10000);
             const timer = setInterval(syncOnce, intervalMs);
             unsubscribes.push(() => {
-              clearTimeout(initial);
+              cancelInitialSync();
               clearInterval(timer);
             });
 
@@ -1513,10 +1558,12 @@ module.exports = (app) => {
             );
           // Send one snapshot shortly after start so crew see the boat
           // without waiting a full interval, then on the recurring timer.
-          const initial = setTimeout(sendOnce, 5000);
+          // Send one snapshot once the node is ready so crew see the boat
+          // without waiting a full interval, then on the recurring timer.
+          const cancelInitialTelemetry = fireWhenReady(rns, sendOnce, 5000);
           const timer = setInterval(sendOnce, intervalMs);
           unsubscribes.push(() => {
-            clearTimeout(initial);
+            cancelInitialTelemetry();
             clearInterval(timer);
           });
         }
@@ -1621,19 +1668,19 @@ module.exports = (app) => {
                 const pullOnce = () => {
                   pullDeferredMessages(
                     rfedSetup.client,
-                    RNS.fromHex(nodeHex),
+                    fromHex(nodeHex),
                     rfedChannel,
                     onRFedMessage,
                     app.debug,
                   ).catch((e) => app.debug(`RFed pull error: ${e.message}`));
                 };
-                // Initial pull shortly after start to catch messages stored
-                // while we were offline.
-                const initialPull = setTimeout(pullOnce, 10000);
+                // Initial pull once the node is ready, to catch messages
+                // stored while we were offline.
+                const cancelInitialPull = fireWhenReady(rns, pullOnce, 10000);
                 // Periodic pull every 5 minutes to catch deferred messages.
                 const pullTimer = setInterval(pullOnce, 5 * 60 * 1000);
                 unsubscribes.push(() => {
-                  clearTimeout(initialPull);
+                  cancelInitialPull();
                   clearInterval(pullTimer);
                 });
               }

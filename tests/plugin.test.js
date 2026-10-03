@@ -99,7 +99,21 @@ class FakeRns {
       },
     };
     this.stopped = false;
+    // Mirrors Reticulum.prototype.ready() (@reticulum/core 0.9.3): resolves
+    // when hydration/background init is done. Tests that capture timers can
+    // swap in a pending promise via `readyDeferred` so the ready-gated
+    // initial kicks stay captured in the setTimeout stub instead of firing
+    // during start().
+    this.readyDeferred = null;
   }
+  ready() {
+    // Tests that capture timers set pendingReady so ready-gated initial kicks
+    // stay captured in the setTimeout stub instead of firing during start().
+    if (FakeRns.pendingReady) return new Promise(() => {});
+    return this.readyDeferred || Promise.resolve();
+  }
+  /** When true, ready() never resolves (see ready()). */
+  static pendingReady = false;
   addInterface(iface, isDefault) {
     this.added.push({ iface, isDefault });
   }
@@ -180,8 +194,14 @@ class FakeLxmRouter extends EventTarget {
   stopAnnouncing() {
     this.stopAnnouncingCalls += 1;
   }
-  async send(message, identity, linkId) {
-    this.sent.push({ message, identity, linkId });
+  async send(message, identity, optionsOrLinkId) {
+    // Mirror the @reticulum/lxmf 0.9.3 signature: third argument is a bare
+    // linkId (backwards compatibility) or an options bag.
+    const options =
+      optionsOrLinkId instanceof Uint8Array
+        ? { linkId: optionsOrLinkId }
+        : optionsOrLinkId || {};
+    this.sent.push({ message, identity, options });
   }
   // Propagation (store-and-forward) client methods. The real LXMRouter is
   // configured with `setOutboundPropagationNode`, submits messages via
@@ -1250,7 +1270,7 @@ test('an incoming "ping" that arrived over a Link is replied over that same link
 
   assert.equal(router.sent.length, 1, 'a "Pong" reply was sent');
   assert.equal(
-    router.sent[0].linkId,
+    router.sent[0].options.linkId,
     linkId,
     "reply is sent over the arrival link id",
   );
@@ -1668,6 +1688,9 @@ test("start configures the propagation node and schedules periodic syncs", async
   const app = makeApp();
   const plugin = makePlugin(app);
   FakeLxmRouter.instances.length = 0;
+  // ready()-gated initial kicks are captured via the setTimeout stub below,
+  // so readiness must not resolve during start().
+  FakeRns.pendingReady = true;
 
   const scheduled = [];
   const origSetTimeout = globalThis.setTimeout;
@@ -1731,6 +1754,7 @@ test("start configures the propagation node and schedules periodic syncs", async
   } finally {
     globalThis.setTimeout = origSetTimeout;
     globalThis.setInterval = origSetInterval;
+    FakeRns.pendingReady = false;
     await plugin.stop();
   }
 });
@@ -2053,7 +2077,9 @@ test("start schedules and fires a telemetry broadcast to the crew when enabled",
   const dest = "0123456789abcdef0123456789abcdef";
 
   // Capture the scheduled timers without firing them, so the test stays
-  // deterministic (no real 5 s / interval waits).
+  // deterministic (no real waits). The ready-gated initial telemetry kick is
+  // captured too, so readiness must not resolve during start().
+  FakeRns.pendingReady = true;
   const scheduled = [];
   const origSetTimeout = globalThis.setTimeout;
   const origSetInterval = globalThis.setInterval;
@@ -2098,6 +2124,8 @@ test("start schedules and fires a telemetry broadcast to the crew when enabled",
     );
   } finally {
     globalThis.setTimeout = origSetTimeout;
+    globalThis.setInterval = origSetInterval;
+    FakeRns.pendingReady = false;
     globalThis.setInterval = origSetInterval;
     await plugin.stop();
   }

@@ -44,8 +44,14 @@ class FakeLxmRouter {
   stopAnnouncing() {
     this.stopAnnouncingCalls += 1;
   }
-  async send(message, identity, linkId) {
-    this.sent.push({ message, identity, linkId });
+  async send(message, identity, optionsOrLinkId) {
+    // Mirror the @reticulum/lxmf 0.9.3 signature: the third argument is either
+    // a bare linkId (backwards compatibility) or an options bag.
+    const options =
+      optionsOrLinkId instanceof Uint8Array
+        ? { linkId: optionsOrLinkId }
+        : (optionsOrLinkId ?? {});
+    this.sent.push({ message, identity, options });
   }
 }
 
@@ -282,34 +288,39 @@ test("makeDeliverer forwards the arrival link id so replies ride back over the e
 
   assert.equal(router.sent.length, 1);
   assert.equal(
-    router.sent[0].linkId,
+    router.sent[0].options.linkId,
     linkId,
     "link id passed through to lxmf.send",
   );
 
-  // Without a link id (e.g. notification forwarding) it is left undefined so
-  // the router falls back to opportunistic delivery.
+  // Without a link id (e.g. notification forwarding) the router's default
+  // delivery ladder applies (DIRECT link attempt, opportunistic fallback).
   await deliver("0123456789abcdef0123456789abcdef", "", "Hi");
-  assert.equal(router.sent[1].linkId, undefined);
+  assert.equal(router.sent[1].options.linkId, null);
 
   Object.assign(deps, REAL_DEPS);
 });
 
-test("makeDeliverer falls back to opportunistic delivery when the link reply fails", async () => {
+test("makeDeliverer escalates to opportunistic delivery when the link reply fails", async () => {
   const router = new FakeLxmRouter({}, {});
   const identity = { id: "me" };
   deps.LXMessage = FakeLXMessage;
   deps.fromHex = (hex) => Buffer.from(hex, "hex");
 
-  // Simulate a mobile client that tore the link down after its message was
-  // acknowledged: the link send throws, so the reply must retry opportunistically.
-  let firstAttempt = true;
-  router.send = async (message, sentIdentity, linkId) => {
-    if (firstAttempt && linkId) {
-      firstAttempt = false;
-      throw new Error("Link 7ef48b3f is not available");
+  // Simulate the router's 0.9.3 delivery ladder: the arrival link is gone
+  // (a mobile client tore it down after its own message was acknowledged),
+  // so send() escalates to a single opportunistic packet within one call and
+  // the deliverer never has to retry manually.
+  router.send = async function (message, sentIdentity, optionsOrLinkId) {
+    const options =
+      optionsOrLinkId instanceof Uint8Array
+        ? { linkId: optionsOrLinkId }
+        : optionsOrLinkId || {};
+    if (options.linkId) {
+      // Link send failed inside the router; it escalates to opportunistic.
+      return this.send(message, sentIdentity, null);
     }
-    router.sent.push({ message, identity: sentIdentity, linkId });
+    this.sent.push({ message, identity: sentIdentity, options });
   };
 
   const deliver = makeDeliverer(router, identity);
@@ -319,9 +330,9 @@ test("makeDeliverer falls back to opportunistic delivery when the link reply fai
   assert.equal(
     router.sent.length,
     1,
-    "the failed link send is not counted; one opportunistic retry went out",
+    "one opportunistic delivery went out after the link failed",
   );
-  assert.ok(!router.sent[0].linkId, "retry is opportunistic (no link id)");
+  assert.ok(!router.sent[0].options.linkId, "delivery is opportunistic");
 
   Object.assign(deps, REAL_DEPS);
 });
@@ -337,37 +348,24 @@ test("makeDeliverer records delivery outcomes through the debug logger", async (
   const deliver = makeDeliverer(router, identity, debug);
   const dest = "0123456789abcdef0123456789abcdef";
 
-  // Success over a link.
+  // Success over a link (escalation to opportunistic is the router's job).
   await deliver(dest, "", "Pong", new Uint8Array(8).fill(2));
-  // Success opportunistic (no link).
+  // Success without a link (default delivery ladder).
   await deliver(dest, "", "Hi");
-  // Link fails -> opportunistic fallback succeeds.
-  let firstAttempt = true;
-  router.send = async (message, sentIdentity, linkId) => {
-    if (firstAttempt && linkId) {
-      firstAttempt = false;
-      throw new Error("Link is not available");
-    }
-    router.sent.push({ message, identity: sentIdentity, linkId });
-  };
-  await deliver(dest, "", "Pong", new Uint8Array(8).fill(3));
 
+  const delivered = logs.filter((l) => /LXMF message delivered/.test(l));
+  assert.equal(delivered.length, 2, "each successful delivery is logged once");
   assert.ok(
-    logs.some((l) => /via the arrival link/.test(l)),
+    delivered.some((l) => /via the arrival link/.test(l)),
     "link delivery logged",
   );
-  assert.ok(
-    logs.some((l) => /\(opportunistic\)/.test(l)),
-    "opportunistic delivery logged",
-  );
-  assert.ok(
-    logs.some((l) => /link reply.*failed.*retrying opportunistic/.test(l)),
-    "link failure before fallback logged",
-  );
-  assert.ok(
-    logs.some((l) => /opportunistic fallback/.test(l)),
-    "opportunistic fallback success logged",
-  );
+
+  // A total delivery failure propagates and is not logged as delivered.
+  router.send = async () => {
+    throw new Error("no path");
+  };
+  await assert.rejects(() => deliver(dest, "", "Pong"), /no path/);
+  assert.equal(logs.filter((l) => /LXMF message delivered/.test(l)).length, 2);
 
   Object.assign(deps, REAL_DEPS);
 });
@@ -389,21 +387,26 @@ test("makeDeliverer propagates delivery errors", async () => {
   Object.assign(deps, REAL_DEPS);
 });
 
-test("makeDeliverer re-sends the same LXMessage when the link reply falls back to opportunistic", async () => {
+test("makeDeliverer hands one LXMessage to the router for the whole delivery ladder", async () => {
   const router = new FakeLxmRouter({}, {});
   const identity = { id: "me" };
   deps.LXMessage = FakeLXMessage;
   deps.fromHex = (hex) => Buffer.from(hex, "hex");
 
-  // The link send throws (peer tore the link down), the opportunistic retry
-  // succeeds. Both wire copies must carry the *same* message identity — a
-  // fresh message per attempt would give each copy a distinct id, and a
-  // deduplicating client would render the reply twice.
+  // The link send throws (peer tore the link down) and the router escalates
+  // to an opportunistic retry with the *same* message object — since
+  // @reticulum/lxmf 0.9.3 a Message keeps a stable messageId across retries,
+  // so both wire copies share one identity and a deduplicating client renders
+  // the reply once.
   const attempts = [];
-  router.send = async (message, sentIdentity, linkId) => {
-    attempts.push({ message, linkId });
-    if (linkId) {
-      throw new Error("Link is not available");
+  router.send = async function (message, sentIdentity, optionsOrLinkId) {
+    const options =
+      optionsOrLinkId instanceof Uint8Array
+        ? { linkId: optionsOrLinkId }
+        : optionsOrLinkId || {};
+    attempts.push({ message, options });
+    if (options.linkId) {
+      return this.send(message, sentIdentity, null);
     }
   };
 
@@ -416,13 +419,13 @@ test("makeDeliverer re-sends the same LXMessage when the link reply falls back t
     linkId,
   );
 
-  assert.equal(attempts.length, 2, "link attempt + opportunistic retry");
-  assert.ok(attempts[0].linkId, "first attempt is the link reply");
-  assert.ok(!attempts[1].linkId, "retry is opportunistic (no link id)");
+  assert.equal(attempts.length, 2, "link attempt + opportunistic escalation");
+  assert.ok(attempts[0].options.linkId, "first attempt is the link reply");
+  assert.ok(!attempts[1].options.linkId, "escalation is opportunistic");
   assert.equal(
     attempts[0].message,
     attempts[1].message,
-    "both attempts re-sent one LXMessage object",
+    "both attempts carry one LXMessage object",
   );
   assert.equal(
     sent,
