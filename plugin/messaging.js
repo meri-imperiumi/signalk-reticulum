@@ -7,18 +7,24 @@
  * the real `@reticulum/core`) so this module can be unit-tested without any
  * network I/O.
  *
- * Delivery is opportunistic by default: each message is sent as a single
- * encrypted packet addressed to the recipient's `lxmf.delivery` destination
- * hash, which requires the recipient's identity to be known (learned from an
- * announce). Store-and-forward via a propagation node is a future enhancement.
+ * Delivery escalates through the router's automated fallback ladder
+ * (@reticulum/lxmf 0.9.3 `LXMRouter.send(message, identity, { fallback })`):
+ * DIRECT link → opportunistic packet → store-and-forward via a propagation
+ * node. When a propagation node is in use (the embedded in-plugin node, or an
+ * external one configured/auto-discovered under `propagation`) every outbound
+ * message — replies, alerts *and* telemetry — is submitted to it as the last
+ * resort, mirroring pi-lxmf's delivery behaviour, so a message for an
+ * unreachable peer is stored for them instead of silently dropped.
  *
  * @file messaging.js
  */
 
 const RNS = require("@reticulum/core");
+const { UnknownIdentityError } = require("@reticulum/core");
 const { LXMRouter, LXMessage, LXMFConstants } = require("@reticulum/lxmf");
 
 const { withAppearance } = require("./appearance");
+const { submitToEmbeddedNode } = require("./propagation");
 
 /** Injected transport classes; tests swap these for fakes. */
 const deps = {
@@ -29,6 +35,178 @@ const deps = {
   fromHex: RNS.fromHex,
   toHex: RNS.toHex,
 };
+
+/**
+ * Per-attempt time budget handed to the router's delivery ladder: how long a
+ * DIRECT link establishment or an opportunistic identity solicitation may
+ * take before the router escalates to the next rung. Generous on purpose —
+ * a peer may be several slow mesh hops away. Same value pi-lxmf uses.
+ *
+ * @type {number}
+ */
+const OUTBOUND_TIMEOUT_MS = 30_000;
+
+/**
+ * Whether `e` is one of the two failures the router's propagation handoff
+ * (`send` escalation rung 3 / `submitToPropagationNode`) produces when it
+ * *declines* instead of queueing:
+ *
+ *  - `Propagation node identity unknown for …` — the external node's announce
+ *    has not been heard yet (fresh start), so its identity is not recallable
+ *    and no link to it can be established.
+ *  - `… no outbound propagation node is configured` — the router has no
+ *    outbound node set, which happens when the in-plugin *embedded*
+ *    propagation node is the store-and-forward target: its announce is never
+ *    ingested in-process (loopback gap), so the link-based handoff is skipped
+ *    entirely and the sender submits to the embedded node itself instead.
+ *
+ * @param {unknown} e
+ * @returns {boolean}
+ */
+function isPropagationHandoffError(e) {
+  return (
+    e instanceof Error &&
+    /Propagation node identity unknown|no outbound propagation node is configured/.test(
+      e.message,
+    )
+  );
+}
+
+/**
+ * Builds the single outbound send function behind every LXMF deliverer
+ * (replies, alerts, telemetry) — the pi-lxmf delivery pattern:
+ *
+ *  1. One `lxmf.send` call with the router's automated escalation
+ *     (`fallback: "propagation"` when a propagation node is in use): DIRECT
+ *     link → opportunistic packet (proof-settled; a stale path fails the
+ *     proof wait and counts as a failure) → propagation handoff — all against
+ *     one serialized message, so every wire copy shares one message id.
+ *  2. When the router's propagation handoff *declines* instead of queueing
+ *     ({@link isPropagationHandoffError}), the sender recovers exactly like
+ *     pi-lxmf's `createRetrySender`:
+ *     - **Embedded node** — submit to the in-plugin propagation node
+ *       in-process ({@link module:propagation~submitToEmbeddedNode}), which
+ *       stores the message for the recipient (or auto-delivers it locally).
+ *     - **External node** — request a path and wait up to the timeout for the
+ *       node's announce, then resend; the message keeps its message id across
+ *       serializations, so wire-level dedup still holds.
+ *
+ * The embedded-node getter is late-bound: the embedded propagation node is
+ * brought up after the LXMF router, so the sender re-evaluates it on every
+ * send instead of capturing it once.
+ *
+ * @param {object} deps
+ * @param {object} deps.lxmf - An initialised LXMRouter.
+ * @param {object} deps.identity - The sender Reticulum identity.
+ * @param {(msg: string) => void} [deps.debug] - Signal K `app.debug`-style logger.
+ * @param {() => (object|null)} [deps.getEmbeddedNode] - Returns the embedded
+ *   propagation node (`lxmf.propagationNode`-shaped, with `ingestBlobs`) when
+ *   the in-plugin node is running, else null. Read at send time.
+ * @param {number} [deps.timeoutMs] - Per-attempt time budget.
+ * @returns {(message: object, options?: {linkId?: Uint8Array|null}) => Promise<void>}
+ */
+function makeOutboundSender({
+  lxmf,
+  identity,
+  debug = () => {},
+  getEmbeddedNode,
+  timeoutMs = OUTBOUND_TIMEOUT_MS,
+}) {
+  return async function send(message, { linkId = null } = {}) {
+    const embeddedNode =
+      typeof getEmbeddedNode === "function" ? getEmbeddedNode() : null;
+    const hasPropagationNode = !!(lxmf.outboundPropagationNode || embeddedNode);
+    const options = {
+      linkId,
+      fallback: hasPropagationNode ? "propagation" : "opportunistic",
+      timeoutMs,
+    };
+    try {
+      await lxmf.send(message, identity, options);
+      return;
+    } catch (e) {
+      if (!hasPropagationNode || !isPropagationHandoffError(e)) {
+        throw e;
+      }
+      // Direct and opportunistic delivery both failed and the router's
+      // propagation handoff declined instead of queueing. Recover so the
+      // message is stored for the recipient rather than dropped.
+      if (embeddedNode) {
+        debug(
+          "Direct delivery failed and the router cannot link to the embedded " +
+            "propagation node in-process — submitting to it directly",
+        );
+        await submitToEmbeddedNode(
+          lxmf,
+          embeddedNode,
+          message,
+          identity,
+          debug,
+        );
+        return;
+      }
+      const nodeHash = lxmf.outboundPropagationNode;
+      debug(
+        `Propagation node identity unknown — requesting path, waiting up to ` +
+          `${Math.round(timeoutMs / 1000)}s for its announce`,
+      );
+      const transport = lxmf.rns?.transport;
+      if (
+        !transport ||
+        typeof transport.recallOrSolicitIdentity !== "function"
+      ) {
+        throw e;
+      }
+      try {
+        await transport.recallOrSolicitIdentity(nodeHash, timeoutMs);
+      } catch (solicitError) {
+        debug(
+          `No announce from the propagation node in ${Math.round(
+            timeoutMs / 1000,
+          )}s — giving up`,
+        );
+        // Surface the original delivery failure, not the solicit timeout.
+        if (
+          (UnknownIdentityError &&
+            solicitError instanceof UnknownIdentityError) ||
+          solicitError.name === "UnknownIdentityError"
+        ) {
+          throw e;
+        }
+        throw solicitError;
+      }
+      await lxmf.send(message, identity, options);
+      debug(
+        "Recipient unreachable directly — submitted via the propagation node " +
+          "(delivered on their next sync)",
+      );
+    }
+  };
+}
+
+/**
+ * Resolves the outbound-sender options shared by the deliverer builders:
+ * `debug`, the late-bound embedded propagation node getter and the per-attempt
+ * timeout. Accepts the legacy positional `debug` logger too, so callers can
+ * pass either `makeDeliverer(lxmf, identity, { debug })` or a bare logger.
+ *
+ * @param {object|((msg:string)=>void)|undefined} options
+ * @param {((msg:string)=>void)|undefined} [positionalDebug]
+ * @returns {{debug: (msg: string) => void, getEmbeddedNode?: () => object|null, timeoutMs?: number}}
+ */
+function resolveSenderOptions(options, positionalDebug) {
+  if (typeof options === "function") {
+    return { debug: options };
+  }
+  const resolved = options || {};
+  return {
+    debug: resolved.debug || positionalDebug || (() => {}),
+    ...(resolved.getEmbeddedNode
+      ? { getEmbeddedNode: resolved.getEmbeddedNode }
+      : {}),
+    ...(resolved.timeoutMs ? { timeoutMs: resolved.timeoutMs } : {}),
+  };
+}
 
 /**
  * Creates and initialises an LXMF router bound to `identity` on `rns`, then
@@ -100,66 +278,41 @@ async function setupMessaging(rns, identity, options = {}, log = () => {}) {
  * bound to the given router and sender identity. Each call constructs and
  * sends a single LXMF message to the recipient's `lxmf.delivery` destination.
  *
- * When `linkId` is supplied the message is first tried over that already-
- * established Link (the prompt path the LXMF echobot uses). If that link send
- * fails — most importantly when a battery-conscious mobile client tears the
- * link down right after its own message is acknowledged, so the link is gone
- * by the time we reply — the router escalates to opportunistic single-packet
- * delivery (LXMF.md §5.1, the `fallback: "opportunistic"` delivery ladder
- * @reticulum/lxmf 0.9.3 automates in `LXMRouter.send`). That is the same path
- * telemetry and alerts already use to reach these clients reliably, so a
- * reply never goes missing just because the arrival link did not stay open.
- * Without a `linkId` the router's default delivery ladder applies (establish
- * a DIRECT link when possible, opportunistic fallback).
+ * Delivery rides the shared outbound sender ({@link makeOutboundSender}): the
+ * router tries the supplied arrival link first and escalates — opportunistic
+ * single packet when the link send fails (typically a battery-conscious
+ * mobile client tore the link down right after its own message was
+ * acknowledged), then store-and-forward via the propagation node when the
+ * recipient can't be reached at all (LXMF.md §5.1/§5.8, the delivery ladder
+ * @reticulum/lxmf 0.9.3 automates in `LXMRouter.send`). All of that happens
+ * inside one `send` call against one serialized message, so every wire copy
+ * of one reply shares one message id and a client that deduplicates by
+ * message hash (Sideband, Nomad Network) renders the reply once even when a
+ * fallback copy also arrives.
  *
- * One LXMessage identity per logical reply: the message is built once per
- * call (or taken from the optional `prebuilt` argument — see
- * {@link module:propagation~makeAutoDeliverer}) and the same object is sent
- * on every delivery attempt. Since @reticulum/lxmf 0.9.3 a `Message`
- * guarantees a stable `messageId` (and timestamp) across repeated
- * serialisations and delivery retries, so every wire copy of one reply shares
- * one message id and a client that deduplicates by message hash (Sideband,
- * Nomad Network) shows the reply once even when a fallback copy also arrives.
- * The sent message is returned so wrapping deliverers can thread the same
- * identity into their fallbacks.
- *
- * Rejects if the recipient's identity is unknown or delivery fails; the caller
- * (notification forwarding) logs and continues with the next recipient.
+ * Rejects if delivery fails on every rung; the caller (notification
+ * forwarding) logs and continues with the next recipient.
  *
  * @param {object} lxmf - An initialised LXMRouter.
  * @param {object} identity - The sender Reticulum identity.
- * @param {(...args:any[])=>void} [debug] - Signal K `app.debug`-style logger
- *   used to record each delivery outcome (link, opportunistic, or fallback).
- * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, prebuilt?:object)=>Promise<object>}
- *   Resolves with the LXMessage that was sent (the prebuilt one when given).
+ * @param {object|((msg:string)=>void)} [options] - Outbound sender options
+ *   (`debug`, `getEmbeddedNode`, `timeoutMs`) or, for convenience, a bare
+ *   debug logger.
+ * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null)=>Promise<object>}
+ *   Resolves with the LXMessage that was sent.
  */
-function makeDeliverer(lxmf, identity, debug = () => {}) {
-  return async function deliver(
-    destinationHashHex,
-    title,
-    content,
-    linkId,
-    prebuilt,
-  ) {
-    const build = () =>
-      prebuilt ||
-      new deps.LXMessage({
-        sourceHash: lxmf.deliveryDest.destinationHash,
-        destinationHash: deps.fromHex(destinationHashHex),
-        title,
-        content,
-      });
-    // Built once and handed to the router: a Message keeps a stable messageId
-    // across delivery retries, so a deduplicating client renders the reply
-    // once even when the opportunistic fallback also arrives.
-    const message = build();
-    // The router tries the supplied arrival link first and escalates to an
-    // opportunistic single packet when the link send fails (typically the
-    // peer closed the link after its message was acknowledged).
-    await lxmf.send(message, identity, {
-      linkId: linkId ?? null,
-      fallback: "opportunistic",
+function makeDeliverer(lxmf, identity, options = {}) {
+  const senderOptions = resolveSenderOptions(options);
+  const sender = makeOutboundSender({ lxmf, identity, ...senderOptions });
+  const debug = senderOptions.debug;
+  return async function deliver(destinationHashHex, title, content, linkId) {
+    const message = new deps.LXMessage({
+      sourceHash: lxmf.deliveryDest.destinationHash,
+      destinationHash: deps.fromHex(destinationHashHex),
+      title,
+      content,
     });
+    await sender(message, { linkId });
     debug(
       `LXMF message delivered to ${destinationHashHex}${
         linkId ? " via the arrival link (or its fallback)" : ""
@@ -192,9 +345,16 @@ function makeDeliverer(lxmf, identity, debug = () => {}) {
  * @param {object} identity - The sender Reticulum identity.
  * @param {{icon?:string, fg?:[number,number,number], bg?:[number,number,number]}|null} [appearance]
  *   Resolved node appearance to advertise with each telemetry message.
+ * @param {object} [options] - Outbound sender options (`debug`,
+ *   `getEmbeddedNode`, `timeoutMs`) shared with {@link makeDeliverer}.
  * @returns {(destinationHashHex:string, packedTelemetry:Uint8Array)=>Promise<void>}
  */
-function makeTelemetryDeliverer(lxmf, identity, appearance) {
+function makeTelemetryDeliverer(lxmf, identity, appearance, options = {}) {
+  const sender = makeOutboundSender({
+    lxmf,
+    identity,
+    ...resolveSenderOptions(options),
+  });
   return async function deliverTelemetry(destinationHashHex, packedTelemetry) {
     const base = new Map([[deps.FIELD_TELEMETRY, packedTelemetry]]);
     const fields = withAppearance(base, appearance, deps.FIELD_ICON_APPEARANCE);
@@ -205,7 +365,7 @@ function makeTelemetryDeliverer(lxmf, identity, appearance) {
       content: "",
       fields,
     });
-    await lxmf.send(message, identity);
+    await sender(message);
   };
 }
 
@@ -327,7 +487,10 @@ async function verifySender(lxmf, message) {
 
 module.exports = {
   deps,
+  OUTBOUND_TIMEOUT_MS,
   setupMessaging,
+  isPropagationHandoffError,
+  makeOutboundSender,
   makeDeliverer,
   makeTelemetryDeliverer,
   attachInboundDiagnostics,

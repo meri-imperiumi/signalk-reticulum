@@ -5,6 +5,7 @@ const {
   deps,
   setupMessaging,
   makeDeliverer,
+  makeOutboundSender,
   makeTelemetryDeliverer,
   verifySender,
 } = require("../plugin/messaging");
@@ -436,37 +437,170 @@ test("makeDeliverer hands one LXMessage to the router for the whole delivery lad
   Object.assign(deps, REAL_DEPS);
 });
 
-test("makeDeliverer sends a prebuilt LXMessage as-is instead of building a new one", async () => {
+// --- makeOutboundSender: the pi-lxmf delivery pattern -----------------------
+
+test("makeOutboundSender passes the router's propagation rung when a node is in use", async () => {
   const router = new FakeLxmRouter({}, {});
-  const identity = { id: "me" };
-  deps.LXMessage = FakeLXMessage;
-  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+  router.outboundPropagationNode = Buffer.alloc(16, 9);
+  const sent = [];
+  router.send = async (message, identity, options) => {
+    sent.push(options);
+  };
 
-  const deliver = makeDeliverer(router, identity);
-  const prebuilt = new FakeLXMessage({
-    sourceHash: router.deliveryDest.destinationHash,
-    destinationHash: Buffer.from("0123456789abcdef0123456789abcdef", "hex"),
-    title: "",
-    content: "Pong",
-    timestamp: 1234.5,
+  const send = makeOutboundSender({ lxmf: router, identity: { id: "me" } });
+  await send({});
+  await send({}, { linkId: new Uint8Array(8).fill(2) });
+
+  assert.deepEqual(sent[0], {
+    linkId: null,
+    fallback: "propagation",
+    timeoutMs: 30_000,
   });
-  const sent = await deliver(
-    "0123456789abcdef0123456789abcdef",
-    "",
-    "different content, ignored",
-    null,
-    prebuilt,
-  );
+  assert.equal(sent[1].fallback, "propagation");
+  assert.ok(sent[1].linkId instanceof Uint8Array, "arrival link forwarded");
+});
 
-  assert.equal(sent, prebuilt, "the prebuilt message is the one returned");
-  assert.equal(router.sent.length, 1);
+test("makeOutboundSender stays on the opportunistic rung without a propagation node", async () => {
+  const router = new FakeLxmRouter({}, {});
+  const sent = [];
+  router.send = async (message, identity, options) => {
+    sent.push(options);
+  };
+
+  const send = makeOutboundSender({
+    lxmf: router,
+    identity: {},
+    getEmbeddedNode: () => null,
+  });
+  await send({});
+
+  assert.equal(sent[0].fallback, "opportunistic");
+});
+
+test("makeOutboundSender rethrows delivery failures that are not propagation handoffs", async () => {
+  const router = new FakeLxmRouter({}, {});
+  router.send = async () => {
+    throw new Error("identity unknown for recipient");
+  };
+
+  const send = makeOutboundSender({ lxmf: router, identity: {} });
+  await assert.rejects(() => send({}), /identity unknown for recipient/);
+});
+
+test("makeOutboundSender solicits the external node's announce and resends when its identity is unknown", async () => {
+  const router = new FakeLxmRouter({}, {});
+  const nodeHash = Buffer.alloc(16, 9);
+  router.outboundPropagationNode = nodeHash;
+  router.rns = {
+    transport: {
+      solicitCalls: [],
+      async recallOrSolicitIdentity(hash, timeoutMs) {
+        this.solicitCalls.push({ hash, timeoutMs });
+      },
+    },
+  };
+  const sent = [];
+  let firstAttempt = true;
+  router.send = async (message, identity, options) => {
+    if (firstAttempt) {
+      firstAttempt = false;
+      // First attempt: direct and opportunistic both failed and the router's
+      // propagation handoff declined (node announce not heard yet).
+      throw new Error(
+        `Propagation node identity unknown for ${Buffer.from(nodeHash).toString("hex")}; wait for its announce.`,
+      );
+    }
+    sent.push(options);
+  };
+  const logs = [];
+
+  const send = makeOutboundSender({
+    lxmf: router,
+    identity: { id: "me" },
+    debug: (msg) => logs.push(msg),
+  });
+  await send({});
+
+  assert.equal(router.rns.transport.solicitCalls.length, 1);
+  assert.equal(router.rns.transport.solicitCalls[0].hash, nodeHash);
+  assert.equal(sent.length, 1, "the message was resent after the solicit");
+  assert.equal(sent[0].fallback, "propagation");
+  assert.ok(
+    logs.some((l) => /Propagation node identity unknown/.test(l)),
+    "solicit logged",
+  );
+  assert.ok(
+    logs.some((l) => /submitted via the propagation node/.test(l)),
+    "propagated delivery logged",
+  );
+});
+
+test("makeOutboundSender gives up with the original error when the node never announces", async () => {
+  const router = new FakeLxmRouter({}, {});
+  router.outboundPropagationNode = Buffer.alloc(16, 9);
+  router.rns = {
+    transport: {
+      async recallOrSolicitIdentity() {
+        const err = new Error("no announce within the time budget");
+        err.name = "UnknownIdentityError";
+        throw err;
+      },
+    },
+  };
+  router.send = async () => {
+    throw new Error(
+      "Propagation node identity unknown for 0909; wait for its announce.",
+    );
+  };
+
+  const send = makeOutboundSender({ lxmf: router, identity: {} });
+  // The original delivery failure surfaces, not the solicit timeout.
+  await assert.rejects(() => send({}), /Propagation node identity unknown/);
+});
+
+test("makeOutboundSender submits to the embedded propagation node when the router cannot hand off", async () => {
+  const { packPropagationContainer } = require("@reticulum/lxmf");
+  const router = new FakeLxmRouter({}, {});
+  // No external node configured: the embedded node is the store-and-forward
+  // target, and the router's link-based handoff is skipped entirely (its
+  // announce is never ingested in-process).
+  router._packForPropagationSubmit = async (message, identity, stampCost) => ({
+    container: packPropagationContainer([new Uint8Array([1, 2, 3])]),
+    transientId: new Uint8Array(16).fill(9),
+    stampCost,
+  });
+  router.send = async () => {
+    throw new Error(
+      "Cannot deliver to aabb: direct and opportunistic failed, and no outbound propagation node is configured",
+    );
+  };
+  const ingested = [];
+  const embeddedNode = {
+    stampCost: 0,
+    async ingestBlobs(blobs) {
+      ingested.push(blobs);
+      return { stored: 1, delivered: 0, rejected: 0 };
+    },
+  };
+  const logs = [];
+
+  const send = makeOutboundSender({
+    lxmf: router,
+    identity: { id: "me" },
+    debug: (msg) => logs.push(msg),
+    getEmbeddedNode: () => embeddedNode,
+  });
+  await send({});
+
   assert.equal(
-    router.sent[0].message,
-    prebuilt,
-    "the prebuilt message is sent untouched",
+    ingested.length,
+    1,
+    "the message blob reached the embedded node",
   );
-
-  Object.assign(deps, REAL_DEPS);
+  assert.ok(
+    logs.some((l) => /embedded propagation node/.test(l)),
+    `embedded submit logged: ${logs.join(" | ")}`,
+  );
 });
 
 // --- verifySender: the propagation-sync signature-verification gate ----------

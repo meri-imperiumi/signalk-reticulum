@@ -1,10 +1,10 @@
 /**
  * LXMF store-and-forward (propagation) *client* support.
  *
- * The node acts as a client of an external LXMF propagation node — it never
- * runs the propagation-node role itself (LXMF.md §5.3). Run a dedicated
- * propagation node (NomadNet, Sideband, rnsd, …) on the boat and point this
- * plugin at its `lxmf.propagation` destination hash.
+ * The node acts as a client of an LXMF propagation node — it never runs the
+ * propagation-node role itself (LXMF.md §5.3). Run a dedicated propagation
+ * node (NomadNet, Sideband, rnsd, …) on the boat and point this plugin at its
+ * `lxmf.propagation` destination hash.
  *
  * Two directions are wired up:
  *
@@ -15,13 +15,13 @@
  *    to the boat while it was offline (no mesh path) are delivered once it
  *    syncs from the node.
  *
- *  - **Sending** — {@link makeAutoDeliverer} prefers direct delivery (the
- *    opportunistic/link path alerts already use) and only falls back to
- *    {@link makePropagationDeliverer} (store-and-forward submit) when the
- *    recipient can't be reached right now — i.e. no path to their
- *    `lxmf.delivery` destination is known — mirroring Sideband's auto outbox
- *    mode. The message is then stored at the propagation node until the
- *    recipient next syncs.
+ *  - **Sending** — the router's own escalation ladder handles it
+ *    (`LXMRouter.send` with `fallback: "propagation"`, driven by
+ *    `messaging.makeOutboundSender`): when a recipient can't be reached
+ *    directly the message is submitted to the configured external node via
+ *    `submitToPropagationNode`, or to the embedded in-plugin node via
+ *    {@link submitToEmbeddedNode} (the link-based submit cannot reach a local
+ *    destination). The message is then stored until the recipient next syncs.
  *
  * The transport classes are injected through {@link deps} (defaulting to the
  * real `@reticulum/core`) so this module can be unit-tested without network
@@ -120,177 +120,8 @@ async function syncFromNode(lxmf, identity, log = () => {}) {
 }
 
 /**
- * Builds a fresh LXMF for a direct/propagation fallback pair, bound to the
- * router's own delivery destination. Used by {@link makeAutoDeliverer} so
- * every attempt for one logical reply shares a single message id.
- *
- * @param {object} lxmf - An initialised LXMRouter.
- * @returns {(destinationHashHex:string, title:string, content:string)=>object}
- */
-function makeMessageBuilder(lxmf) {
-  return (destinationHashHex, title, content) =>
-    new deps.LXMessage({
-      sourceHash: lxmf.deliveryDest.destinationHash,
-      destinationHash: deps.fromHex(destinationHashHex),
-      title,
-      content,
-    });
-}
-
-/**
- * Builds a `deliver(destinationHashHex, title, content, linkId?, prebuilt?)`
- * callback that submits a single LXMF message to the configured propagation
- * node for store-and-forward delivery (LXMF.md §5.8 / LXMessage PROPAGATED).
- *
- * The arrival `linkId` is accepted for signature parity with the direct
- * deliverer but ignored: a propagated message always travels over a fresh link
- * to the propagation node, never the link an inbound message arrived on.
- * When `prebuilt` is supplied (a direct attempt failed and the auto deliverer
- * is falling back) that exact message is submitted, so the stored copy carries
- * the same message id as the direct attempt and a deduplicating client
- * renders the reply once even if both copies arrive.
- *
- * Rejects (and the caller logs and continues) when the propagation node is
- * unreachable or the recipient identity is unknown to the node.
- *
- * @param {object} lxmf - An initialised LXMRouter.
- * @param {object} identity - The sender Reticulum identity.
- * @param {(...args:any[])=>void} [debug] - Signal K `app.debug`-style logger.
- * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, prebuilt?:object)=>Promise<void>}
- */
-function makePropagationDeliverer(lxmf, identity, debug = () => {}) {
-  return async function deliverViaPropagation(
-    destinationHashHex,
-    title,
-    content,
-    // The arrival link id is ignored: a propagated message always travels
-    // over a fresh link to the propagation node, never the link an inbound
-    // message arrived on. Accepted for signature parity with the direct
-    // deliverer.
-    _linkId,
-    prebuilt,
-  ) {
-    const message =
-      prebuilt ||
-      new deps.LXMessage({
-        sourceHash: lxmf.deliveryDest.destinationHash,
-        destinationHash: deps.fromHex(destinationHashHex),
-        title,
-        content,
-      });
-    const result = await lxmf.submitToPropagationNode(message, identity);
-    debug(
-      `LXMF message submitted to the propagation node for ${destinationHashHex}` +
-        ` (stamp cost ${result.stampCost})`,
-    );
-  };
-}
-
-/**
- * Builds a `deliver` callback that prefers direct delivery and falls back
- * to the propagation node when the recipient can't be reached — mirroring
- * Sideband's auto outbox mode, with two triggers:
- *
- *  - **No known path** to their `lxmf.delivery` destination
- *    (`transport.hasPath` returns false), or
- *  - **direct delivery failed** — the direct deliverer threw (no identity,
- *    link failure, or — with a proof-aware transport — no delivery proof
- *    arrived before the proof-wait timeout, meaning the mesh silently
- *    dropped the packet).
- *
- * When the recipient *is* reachable the direct deliverer runs (it itself does
- * link-then-opportunistic); on either fallback trigger the message is
- * submitted to the propagation node so it is stored until the recipient next
- * syncs. When no path check is available (the transport lacks `hasPath`)
- * direct delivery is always tried first, preserving the pre-propagation
- * behaviour.
- *
- * A `buildMessage` factory (see {@link makeMessageBuilder}) makes every
- * attempt for one logical reply share a single LXMessage identity: the message
- * is built once per delivery and passed to both deliverers as their optional
- * `prebuilt` argument, so a fallback copy the client receives alongside the
- * direct one carries the same message id and is deduplicated client-side —
- * instead of showing up as a duplicate reply.
- *
- * Note the fallback can duplicate a message when the direct packet was
- * actually delivered but its proof was lost in transit — the same trade
- * Python LXMF's auto outbox mode makes; clients deduplicate by message hash.
- *
- * @param {object} options
- * @param {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, prebuilt?:object)=>Promise<void>} options.directDeliver
- * @param {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, prebuilt?:object)=>Promise<void>} options.propagationDeliver
- * @param {(destinationHash:Uint8Array)=>boolean} [options.hasPath]
- *   `rns.transport.hasPath` (or equivalent); when omitted the recipient is
- *   always assumed reachable so direct delivery is tried first.
- * @param {(hex:string)=>Uint8Array} [options.fromHex]
- * @param {(destinationHashHex:string, title:string, content:string)=>object} [options.buildMessage]
- *   Optional LXMessage factory; when given, one message per delivery is
- *   threaded through both paths.
- * @param {(...args:any[])=>void} [options.debug]
- * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null)=>Promise<void>}
- */
-function makeAutoDeliverer({
-  directDeliver,
-  propagationDeliver,
-  hasPath,
-  fromHex = deps.fromHex,
-  debug = () => {},
-  buildMessage,
-}) {
-  return async function deliverAuto(
-    destinationHashHex,
-    title,
-    content,
-    linkId,
-  ) {
-    // One LXMessage identity per logical delivery, shared by the direct
-    // attempt and any propagation fallback, so duplicate wire copies are
-    // deduplicated client-side by message hash.
-    const message =
-      typeof buildMessage === "function"
-        ? buildMessage(destinationHashHex, title, content)
-        : undefined;
-    const canCheck = typeof hasPath === "function";
-    const reachable = !canCheck || hasPath(fromHex(destinationHashHex));
-    if (reachable) {
-      try {
-        return await directDeliver(
-          destinationHashHex,
-          title,
-          content,
-          linkId,
-          message,
-        );
-      } catch (e) {
-        debug(
-          `Direct delivery to ${destinationHashHex} failed (${e.message}); ` +
-            "falling back to store-and-forward via the propagation node",
-        );
-        return await propagationDeliver(
-          destinationHashHex,
-          title,
-          content,
-          linkId,
-          message,
-        );
-      }
-    }
-    debug(
-      `No path to ${destinationHashHex}; falling back to store-and-forward via the propagation node`,
-    );
-    return propagationDeliver(
-      destinationHashHex,
-      title,
-      content,
-      linkId,
-      message,
-    );
-  };
-}
-
-/**
  * Submits a message to an *embedded* propagation node in-process, bypassing
- * the link a remote {@link makePropagationDeliverer} establishes.
+ * the link-based `submitToPropagationNode` the router uses for external nodes.
  *
  * When the plugin runs its own propagation node, the node and its client
  * share one Reticulum instance and identity. A link-based
@@ -343,58 +174,10 @@ async function submitToEmbeddedNode(lxmf, node, message, senderIdentity, log) {
   return { transientId, stampCost };
 }
 
-/**
- * Builds a `deliver(destinationHashHex, title, content, linkId?, prebuilt?)`
- * callback that submits a single LXMF message to an *embedded* propagation
- * node in-process (the in-process counterpart to
- * {@link makePropagationDeliverer}).
- *
- * Used by {@link makeAutoDeliverer} as the store-and-forward fallback when an
- * embedded propagation node is running: a reachable recipient still gets direct
- * delivery; an unreachable one has the message stored until they next sync.
- * A `prebuilt` message (from a failed direct attempt) is submitted as-is so
- * both copies share one message id and deduplicate client-side.
- *
- * @param {object} lxmf - An initialised LXMRouter with propagation enabled.
- * @param {object} node - The embedded `PropagationNode` (`lxmf.propagationNode`).
- * @param {object} identity - The sender Reticulum identity.
- * @param {(...args:any[])=>void} [debug]
- * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, prebuilt?:object)=>Promise<void>}
- */
-function makeEmbeddedPropagationDeliverer(
-  lxmf,
-  node,
-  identity,
-  debug = () => {},
-) {
-  return async function deliverViaEmbeddedPropagation(
-    destinationHashHex,
-    title,
-    content,
-    // The arrival link id is ignored (see makePropagationDeliverer).
-    _linkId,
-    prebuilt,
-  ) {
-    const message =
-      prebuilt ||
-      new deps.LXMessage({
-        sourceHash: lxmf.deliveryDest.destinationHash,
-        destinationHash: deps.fromHex(destinationHashHex),
-        title,
-        content,
-      });
-    await submitToEmbeddedNode(lxmf, node, message, identity, debug);
-  };
-}
-
 module.exports = {
   deps,
   normalizeNodeHash,
   configurePropagationNode,
   syncFromNode,
-  makeMessageBuilder,
-  makePropagationDeliverer,
-  makeAutoDeliverer,
   submitToEmbeddedNode,
-  makeEmbeddedPropagationDeliverer,
 };

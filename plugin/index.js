@@ -51,10 +51,6 @@ const {
   normalizeNodeHash,
   configurePropagationNode,
   syncFromNode,
-  makeMessageBuilder,
-  makePropagationDeliverer,
-  makeAutoDeliverer,
-  makeEmbeddedPropagationDeliverer,
 } = require("./propagation");
 const { makeRecentFilter, messageKey } = require("./dedup");
 const {
@@ -807,16 +803,6 @@ module.exports = (app) => {
         // messaging (deliver stays undefined and alerts are skipped).
         let deliver;
         /**
-         * Outbound LXMF delivery callback for *conversational* traffic —
-         * command replies and notification forwards alike. Defaults to the
-         * direct (opportunistic/link) deliverer, but is wrapped in a
-         * direct-first / propagation-fallback deliverer when an LXMF
-         * propagation node is configured, so a reply to an unreachable peer
-         * is stored for them instead of silently dropped. Late-bound: the
-         * propagation wiring below may re-assign it after this handler is
-         * already registered.
-         */
-        let deliverOutbound;
         /** Telemetry delivery callback (set when messaging comes up). */
         let deliverTelemetry;
         /**
@@ -863,11 +849,19 @@ module.exports = (app) => {
               /* best effort */
             }
           });
-          deliver = makeDeliverer(plugin.lxmf, plugin.identity, app.debug);
-          // Bind the outbound deliverer to the direct path immediately, so
-          // replies arriving during the rest of start() (before any
-          // propagation wiring below may wrap it) are never left undefined.
-          deliverOutbound = deliver;
+          // Outbound sender options shared by every LXMF deliverer (replies,
+          // alerts, telemetry): the embedded propagation node is late-bound —
+          // it is brought up after the messaging setup below, so the sender
+          // re-evaluates it on every send.
+          const outboundSenderOptions = {
+            debug: app.debug,
+            getEmbeddedNode: () => plugin.embeddedPropagation || null,
+          };
+          deliver = makeDeliverer(
+            plugin.lxmf,
+            plugin.identity,
+            outboundSenderOptions,
+          );
           // Resolve the node's icon/colors once at startup (the vessel's AIS
           // ship type rarely changes) so every telemetry broadcast advertises
           // the same recognisable avatar to crew members' devices.
@@ -886,6 +880,7 @@ module.exports = (app) => {
             plugin.lxmf,
             plugin.identity,
             appearance,
+            outboundSenderOptions,
           );
 
           // A hung stream write (socket backpressure on a busy host) must
@@ -983,7 +978,7 @@ module.exports = (app) => {
                 // instead of losing it — same policy as notification alerts.
                 (dest, title, content, linkId) =>
                   deps.withTimeout(
-                    () => deliverOutbound(dest, title, content, linkId),
+                    () => deliver(dest, title, content, linkId),
                     120_000,
                     "LXMF delivery",
                   ),
@@ -1143,8 +1138,10 @@ module.exports = (app) => {
               // store addressed to us, so a link-based `syncFromNode` would
               // both fail (the node's identity is never recallable in-process,
               // same loopback gap as the embedded RFed fix) and have nothing
-              // to pull. The store-and-forward *send* fallback is wired below,
-              // after the direct deliverer is set up.
+              // to pull. The store-and-forward *send* fallback is handled by
+              // the outbound sender: it reads `plugin.embeddedPropagation` on
+              // every send and submits to the embedded node in-process when
+              // direct delivery fails.
             }
           } catch (e) {
             app.debug(`Embedded propagation node setup error: ${e.message}`);
@@ -1348,52 +1345,11 @@ module.exports = (app) => {
         // directly (sending). When an embedded propagation node is running,
         // we skip this section entirely and use the embedded node instead.
         //
-        // The outbound deliverer starts as the direct deliverer bound in the
-        // messaging setup above; when a propagation node is configured (or
-        // auto-discovered) it is wrapped below so a recipient with no known
-        // path — or one whose direct delivery fails — is reached via
-        // store-and-forward instead.
-
-        // When an embedded propagation node is running and propagation is
-        // enabled, wire an in-process store-and-forward fallback. The
-        // embedded node and its client share one Reticulum instance, so the
-        // link-based `submitToPropagationNode` can't reach the local
-        // `lxmf.propagation` destination (same loopback gap the embedded RFed
-        // fix addresses). The in-process deliverer ingests directly instead,
-        // so an alert to an unreachable recipient is stored for them rather
-        // than silently dropped. A reachable recipient still gets direct
-        // delivery (promptly), exactly as the remote path does.
-        if (
-          config &&
-          config.propagation &&
-          config.propagation.enabled &&
-          plugin.embeddedPropagation
-        ) {
-          const propagationDeliver = makeEmbeddedPropagationDeliverer(
-            plugin.lxmf,
-            plugin.embeddedPropagation,
-            plugin.identity,
-            app.debug,
-          );
-          deliverOutbound = makeAutoDeliverer({
-            directDeliver: deliver,
-            propagationDeliver,
-            // One LXMessage identity per reply, shared by the direct attempt
-            // and the store-and-forward fallback, so a fallback copy the peer
-            // receives alongside the direct one deduplicates client-side
-            // instead of showing up as a duplicate reply.
-            buildMessage: makeMessageBuilder(plugin.lxmf),
-            hasPath:
-              rns.transport && typeof rns.transport.hasPath === "function"
-                ? rns.transport.hasPath.bind(rns.transport)
-                : undefined,
-            fromHex,
-            debug: app.debug,
-          });
-          app.debug(
-            "Embedded LXMF propagation node wired for store-and-forward",
-          );
-        }
+        // Outbound store-and-forward needs no wiring here: every deliverer
+        // routes through `messaging.makeOutboundSender`, which escalates to
+        // the propagation node configured on the router
+        // (`setOutboundPropagationNode` below, or the embedded node via
+        // `plugin.embeddedPropagation`) whenever direct delivery fails.
 
         if (
           config &&
@@ -1491,28 +1447,9 @@ module.exports = (app) => {
               clearInterval(timer);
             });
 
-            // Sending: wrap the direct deliverer so a recipient with no known
-            // path is reached via store-and-forward. A reachable recipient
-            // still gets the message directly (promptly).
-            const propagationDeliver = makePropagationDeliverer(
-              plugin.lxmf,
-              plugin.identity,
-              app.debug,
-            );
-            deliverOutbound = makeAutoDeliverer({
-              directDeliver: deliver,
-              propagationDeliver,
-              // One LXMessage identity per reply, shared by the direct attempt
-              // and the store-and-forward fallback (see the embedded wiring
-              // above for the rationale).
-              buildMessage: makeMessageBuilder(plugin.lxmf),
-              hasPath:
-                rns.transport && typeof rns.transport.hasPath === "function"
-                  ? rns.transport.hasPath.bind(rns.transport)
-                  : undefined,
-              fromHex,
-              debug: app.debug,
-            });
+            // Sending needs no per-node wiring: the outbound deliverers read
+            // the router's `outboundPropagationNode` (just set above) on every
+            // send and escalate to it when direct delivery fails.
           };
           if (configuredPropagationHex) {
             bringUpPropagation(configuredPropagationHex);
@@ -1822,7 +1759,7 @@ module.exports = (app) => {
                         v.value,
                         episodes,
                         config,
-                        deliverOutbound,
+                        deliver,
                         app,
                       ),
                     ).catch((e) =>
@@ -1843,7 +1780,7 @@ module.exports = (app) => {
         // are kept and retried on the next sweep.
         const notificationSweepTimer = setInterval(() => {
           Promise.resolve(
-            sweepNotifications(episodes, config, deliverOutbound, app),
+            sweepNotifications(episodes, config, deliver, app),
           ).catch((e) => app.debug(`Notification sweep error: ${e.message}`));
         }, 60000);
         unsubscribes.push(() => clearInterval(notificationSweepTimer));

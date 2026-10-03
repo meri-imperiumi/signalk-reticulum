@@ -195,12 +195,26 @@ class FakeLxmRouter extends EventTarget {
     this.stopAnnouncingCalls += 1;
   }
   async send(message, identity, optionsOrLinkId) {
-    // Mirror the @reticulum/lxmf 0.9.3 signature: third argument is a bare
-    // linkId (backwards compatibility) or an options bag.
+    // Mirror the @reticulum/lxmf 0.9.3+ signature: the third argument is
+    // either a bare linkId (backwards compatibility) or an options bag, and
+    // with `fallback: "propagation"` the router escalates on its own when
+    // direct delivery fails: DIRECT link → opportunistic packet →
+    // submitToPropagationNode. The fake models the unreachable case via
+    // `rns.transport._unreachable` (see FakeRns.hasPath).
     const options =
       optionsOrLinkId instanceof Uint8Array
         ? { linkId: optionsOrLinkId }
         : optionsOrLinkId || {};
+    const destHex = Buffer.from(message.options.destinationHash).toString(
+      "hex",
+    );
+    const unreachable = this.rns?.transport?._unreachable?.has(destHex);
+    if (unreachable && options.fallback === "propagation") {
+      // Direct delivery fails inside the router; it escalates to the
+      // configured propagation node within the same send call.
+      await this.submitToPropagationNode(message, identity);
+      return;
+    }
     this.sent.push({ message, identity, options });
   }
   // Propagation (store-and-forward) client methods. The real LXMRouter is
@@ -211,6 +225,9 @@ class FakeLxmRouter extends EventTarget {
   propagationNodeCalls = [];
   setOutboundPropagationNode(destinationHash) {
     this.propagationNodeCalls.push(destinationHash);
+    // Mirror the real router: the outbound sender reads this property to
+    // decide whether the delivery ladder includes the propagation rung.
+    this.outboundPropagationNode = destinationHash;
   }
   submitted = [];
   async submitToPropagationNode(message, identity) {
@@ -1818,7 +1835,8 @@ test("an alert to a reachable crew member is delivered directly (not via propaga
   await new Promise((resolve) => setTimeout(resolve, 10));
 
   // The recipient is reachable (FakeRns.hasPath defaults true), so the alert
-  // goes out as a direct opportunistic send, not a propagation submit.
+  // goes out as a direct send — the fake router only escalates to the
+  // propagation node for unreachable destinations.
   assert.equal(router.sent.length, 1, "delivered directly");
   assert.equal(
     router.submitted.length,
@@ -1858,8 +1876,10 @@ test("an alert to an unreachable crew member falls back to store-and-forward", a
   });
   await new Promise((resolve) => setTimeout(resolve, 10));
 
-  // No known path -> the alert is submitted to the propagation node for
-  // store-and-forward delivery, and no direct packet is emitted.
+  // No known path -> the router's escalation ladder submits the alert to the
+  // propagation node for store-and-forward delivery (the fake models the
+  // ladder: the direct attempt fails inside send, which then submits), so no
+  // direct packet is recorded.
   assert.equal(router.sent.length, 0, "no direct send attempted");
   assert.equal(router.submitted.length, 1, "submitted to the propagation node");
   const { message } = router.submitted[0];
