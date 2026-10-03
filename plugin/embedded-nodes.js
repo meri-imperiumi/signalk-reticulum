@@ -42,7 +42,8 @@ const deps = {
  * Sets up an embedded LXMF propagation node on the given LXMF router.
  *
  * The propagation node is configured with:
- * - A disk-persisted message store (if storage is available)
+ * - A disk-persisted message store (if storage is available), capped at 500 MB
+ *   by default (matching the Python lxmd reference's default messagestore)
  * - Configurable stamp cost (default 16)
  * - Autopeering disabled by default (can be enabled in config)
  * - Static propagation peers (optional)
@@ -83,12 +84,15 @@ async function setupEmbeddedPropagationNode({
   const peeringCost = Number(propConfig.peering_cost) || 18;
   const autopeer = !!propConfig.autopeer;
   const autopeerMaxCost = Number(propConfig.autopeer_max_cost) || 18;
-  const storageLimitMb = Number(propConfig.storage_limit_mb) || null;
+  // 500 MB matches the Python lxmd reference's default messagestore limit.
+  // The cap matters because a propagation node only purges its own copy of a
+  // message when the recipient acks from *it* — deliveries made via a peered
+  // node (e.g. an internet lxmd) never inform this node, so without a cap the
+  // store grows forever with copies this node will never serve again.
+  const storageLimitMb = Number(propConfig.storage_limit_mb) || 500;
   const messageTtlDays = Number(propConfig.message_ttl_days) || null;
 
-  const storageLimitBytes = storageLimitMb
-    ? storageLimitMb * 1000 * 1000
-    : null;
+  const storageLimitBytes = storageLimitMb * 1000 * 1000;
   const messageTtlSecs = messageTtlDays ? messageTtlDays * 24 * 3600 : null;
 
   let store;
@@ -286,17 +290,17 @@ async function setupEmbeddedRFedNode({
   const blobTtlDays = Number(rfedConfig.blob_ttl_days) || BLOB_TTL_DAYS_DEFAULT;
   const deferredTtlDays =
     Number(rfedConfig.deferred_ttl_days) || DEFERRED_TTL_DAYS_DEFAULT;
-  const storageLimitMb = Number(rfedConfig.storage_limit_mb) || null;
+  // 500 MB default: the BlobStore's built-in fallback is the 2 GiB rfed spec
+  // default, which is more federation history than a boat node needs. The cap
+  // is essential here for the same reason as on the LXMF store: blobs fetched
+  // by subscribers via a peered node never purge this node's own copy, so
+  // without a cap the store grows forever. (Historical note: this value must
+  // never be `null` — `BlobStore` only substitutes its default for
+  // `undefined`, and a `null` cap was read as 0 bytes, evicting every blob on
+  // each ingest and leaving `rfedBlobsStored` stuck at 1.)
+  const storageLimitMb = Number(rfedConfig.storage_limit_mb) || 500;
 
-  // `undefined` (not `null`) when unset so the `BlobStore` applies its built-in
-  // 2 GiB spec default (`DEFAULT_STORAGE_LIMIT_BYTES`). Passing `null` would
-  // bypass that default — the constructor only substitutes it for `undefined` —
-  // and `_evictToFit` would then read `usedBytes + neededBytes <= null` as
-  // `<= 0`, evicting every previously stored blob on each ingest and leaving
-  // `communication.reticulum.rfedBlobsStored` stuck at 1.
-  const storageLimitBytes = storageLimitMb
-    ? storageLimitMb * 1000 * 1000
-    : undefined;
+  const storageLimitBytes = storageLimitMb * 1000 * 1000;
   const blobTtlSecs = blobTtlDays * 24 * 3600;
   const deferredTtlSecs = deferredTtlDays * 24 * 3600;
 

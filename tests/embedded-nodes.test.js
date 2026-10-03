@@ -487,14 +487,17 @@ test("setupEmbeddedRFedNode does not call fedSync.seedStaticPeers() itself (RFed
   }
 });
 
-// Regression: when `storage_limit_mb` is unset (the default), the embedded
-// RFed node must keep *every* published blob, not just the latest. The
-// plugin used to pass `storageLimitBytes: null` when the option was unset;
-// `BlobStore` only applies its 2 GiB spec default for `undefined` (not
-// `null`), so `null` was read as a 0-byte cap by `_evictToFit` — every ingest
-// evicted the previous blob and `rfedBlobsStored` stayed pinned at 1. This
-// drives the real `loadRFedStores` dataDir path (no storage limit set) end
-// to end with a real Reticulum + RFedNode and publishes three snapshots.
+// Regression: when `storage_limit_mb` is unset, the embedded RFed node must
+// still have a working byte cap. The plugin used to pass `storageLimitBytes:
+// null` when the option was unset; `BlobStore` only applies its 2 GiB spec
+// default for `undefined` (not `null`), so `null` was read as a 0-byte cap by
+// `_evictToFit` — every ingest evicted the previous blob and
+// `rfedBlobsStored` stayed pinned at 1. The plugin now defaults
+// `storage_limit_mb` to 500 (the cap reason: blobs fetched by subscribers via
+// a peered node never purge this node's own copy, so the store needs a cap to
+// stay bounded). This drives the real `loadRFedStores` dataDir path (no
+// storage limit set) end to end with a real Reticulum + RFedNode and publishes
+// three snapshots.
 test("setupEmbeddedRFedNode keeps every published blob when storage_limit_mb is unset", async () => {
   Object.assign(deps, REAL_DEPS);
   assert.equal(
@@ -518,11 +521,12 @@ test("setupEmbeddedRFedNode keeps every published blob when storage_limit_mb is 
       log: () => {},
     });
     assert.ok(result.node, "rfed node started");
-    // The store must have fallen back to the built-in 2 GiB default, not null.
+    // The store must have the new 500 MB plugin default, not null (null was
+    // the 0-byte-cap bug this test guards against).
     assert.equal(
       result.node.blobStore.storageLimitBytes,
-      2 * 1024 * 1024 * 1024,
-      "unset storage_limit_mb uses the 2 GiB default",
+      500 * 1000 * 1000,
+      "unset storage_limit_mb uses the 500 MB default",
     );
     const publish = makeEmbeddedShipTelemetryPublisher(
       result.node,

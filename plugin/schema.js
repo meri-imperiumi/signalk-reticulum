@@ -701,10 +701,13 @@ function buildPluginSchema(interfaces) {
                 type: "number",
                 title: "Storage limit (MB)",
                 description:
-                  "Maximum storage for stored LXMF messages. Old messages " +
-                  "are evicted when the limit is reached. Leave empty for " +
-                  "unlimited.",
-                default: null,
+                  "Maximum storage for stored LXMF messages. Oldest and " +
+                  "largest messages are evicted when the limit is reached. " +
+                  "Defaults to 500 MB, matching the Python lxmd reference's " +
+                  "default messagestore limit — the node only purges its own " +
+                  "copy of a message when the recipient acks from it, so " +
+                  "without a cap the store grows forever.",
+                default: 500,
                 minimum: 1,
               },
               message_ttl_days: {
@@ -787,9 +790,11 @@ function buildPluginSchema(interfaces) {
                 type: "number",
                 title: "Storage limit (MB)",
                 description:
-                  "Maximum storage for channel blobs. Old blobs are evicted " +
-                  "when the limit is reached. Leave empty for unlimited.",
-                default: null,
+                  "Maximum storage for channel blobs. Oldest and largest " +
+                  "blobs are evicted when the limit is reached. Defaults to " +
+                  "500 MB; the RFed spec default is 2 GiB — raise this if you " +
+                  "want to keep more federation history.",
+                default: 500,
                 minimum: 1,
               },
               blob_ttl_days: {
