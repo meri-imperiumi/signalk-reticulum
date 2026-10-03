@@ -135,6 +135,46 @@ test("watchOutboundFreeze leaves flowing and offline interfaces alone", async ()
   }
 });
 
+test("watchOutboundFreeze tracks interfaces added after construction", async () => {
+  // An interface brought up by the background retry loop after the watchdog
+  // was constructed must still be monitored, not silently skipped forever.
+  const late = { txb: 0, online: true, name: "late" };
+  const freshTxb = { value: 1 };
+  const fresh = {
+    get txb() {
+      return freshTxb.value++;
+    },
+    online: true,
+    name: "fresh",
+  };
+  const probes = [];
+  const interfaces = [];
+  const watchdog = watchOutboundFreeze({
+    interfaces,
+    probeAnnounce: () => probes.push(1),
+    stallAfterMs: 80,
+    probeGraceMs: 60,
+    cooldownMs: 0,
+    pollMs: 20,
+    log: () => {},
+  });
+  try {
+    // Tick a few times with no interfaces, then add one mid-flight.
+    await wait(80);
+    interfaces.push({
+      iface: late,
+      label: "late",
+      buildReplacement: async () => fresh,
+    });
+    await wait(80 + 60 + 250);
+    assert.strictEqual(probes.length, 1, "late interface was probed");
+    assert.strictEqual(watchdog.recycleCount(), 1, "late interface recycled");
+    assert.strictEqual(interfaces[0].iface, fresh);
+  } finally {
+    watchdog.stop();
+  }
+});
+
 test("watchOutboundFreeze cooldown prevents rapid re-swaps", async () => {
   const frozen = { txb: 0, online: true, name: "frozen" };
   const fresh1 = { txb: 0, online: true, name: "fresh1" };

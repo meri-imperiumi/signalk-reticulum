@@ -9,6 +9,7 @@
  * @file interfaces.js
  */
 
+const fs = require("node:fs");
 const { getInterface: defaultGetInterface } = require("@reticulum/node");
 const { configKeyFor } = require("./schema");
 
@@ -109,6 +110,8 @@ function optionsFromEntry(entry) {
  * @param {object[]} configInterfaces
  * @param {(id: string) => any} [getInterface] - Registry lookup, defaults to RNS.
  * @param {(...args: any[]) => void} [log]
+ * @param {() => string[]} [listPorts] - Serial-port enumeration for the failure
+ *   hint; defaults to {@link listSerialPorts}, injectable for tests.
  * @returns {Promise<InterfaceSetupResult>}
  */
 async function setupInterfaces(
@@ -116,6 +119,7 @@ async function setupInterfaces(
   configInterfaces,
   getInterface = defaultGetInterface,
   log = () => {},
+  listPorts = listSerialPorts,
 ) {
   const connected = [];
   const errors = [];
@@ -150,6 +154,18 @@ async function setupInterfaces(
       const msg = `Failed to connect "${type}" interface: ${e.message}`;
       errors.push({ entry, type, error: msg });
       log(msg);
+      // For serial radios the failure is usually the wrong `port` (on a
+      // multi-USB system another dongle often owns /dev/ttyUSB0), so surface
+      // the candidate ports right next to the error.
+      if (type === "rnode-serial") {
+        const ports = listPorts();
+        if (ports.length > 0) {
+          log(
+            `Available serial ports for "${entry && entry.name ? entry.name : type}": ${ports.join(", ")} ` +
+              "— prefer the stable /dev/serial/by-id/… name on Linux",
+          );
+        }
+      }
       // Release any half-open resources before moving on.
       try {
         if (typeof iface.disconnect === "function") {
@@ -163,11 +179,108 @@ async function setupInterfaces(
   return { connected, errors };
 }
 
+/** How often failed interface bring-ups are retried in the background. */
+const RETRY_INTERVAL_MS = 60000;
+
+/**
+ * Lists candidate serial ports for the RNode serial backend, most-specific
+ * first. On Linux (e.g. Venus OS on a Cerbo) USB serial devices are listed via
+ * `/dev/serial/by-id` — stable names tied to the device's USB identity, unlike
+ * `/dev/ttyUSB0` whose numbering depends on enumeration order and is routinely
+ * claimed by another dongle — plus plain `/dev/ttyUSB*`/`/dev/ttyACM*`. On
+ * macOS the `/dev/cu.usb*` devices are listed.
+ *
+ * Used to hint at the right `port` when an RNode serial interface fails to
+ * come up (the failure is usually the wrong port, not a broken radio).
+ *
+ * @param {typeof fs.readdirSync} [readdirSync] - Injectable for tests.
+ * @returns {string[]}
+ */
+function listSerialPorts(readdirSync = fs.readdirSync) {
+  const ports = [];
+  try {
+    for (const name of readdirSync("/dev/serial/by-id")) {
+      ports.push(`/dev/serial/by-id/${name}`);
+    }
+  } catch (_e) {
+    /* Not Linux, or no USB serial devices are plugged in. */
+  }
+  try {
+    for (const name of readdirSync("/dev")) {
+      if (/^(cu\.usb|ttyUSB|ttyACM)/.test(name)) {
+        ports.push(`/dev/${name}`);
+      }
+    }
+  } catch (_e) {
+    /* No /dev to scan. */
+  }
+  return ports;
+}
+
+/**
+ * Makes one background bring-up attempt for interfaces that failed their
+ * initial setup — e.g. an RNode that was still booting, enumerated after the
+ * plugin started, or briefly held by another process. A failure at startup is
+ * otherwise permanent until plugin restart, which is needlessly final for
+ * serial radios that just were not ready yet.
+ *
+ * Each attempt goes through {@link setupInterfaces}, so it inherits its
+ * isolation and teardown behaviour. Interfaces whose `type` is not in the
+ * registry are reported as `unfixable` and never retried (a config error
+ * cannot heal by waiting).
+ *
+ * @param {object} rns - The Reticulum node instance.
+ * @param {{entry: object, type: (string|undefined), error: string}[]} failures
+ *   The `errors` array from an earlier {@link setupInterfaces} round.
+ * @param {(id: string) => any} [getInterface] - Registry lookup.
+ * @param {(...args: any[]) => void} [log]
+ * @returns {Promise<{connected: {iface: object, entry: object}[], stillFailed: {entry: object, type: (string|undefined), error: string}[], unfixable: {entry: object, type: (string|undefined), error: string}[]}>}
+ */
+async function retryFailedInterfaces(
+  rns,
+  failures,
+  getInterface = defaultGetInterface,
+  log = () => {},
+) {
+  const connected = [];
+  const stillFailed = [];
+  const unfixable = [];
+  for (const failure of failures) {
+    if (!failure || typeof getInterface(failure.type) !== "function") {
+      unfixable.push(failure);
+      continue;
+    }
+    const result = await setupInterfaces(
+      rns,
+      [failure.entry],
+      getInterface,
+      log,
+    );
+    const iface = result.connected[0];
+    if (iface) {
+      log(
+        `Interface "${failure.type}" connected on retry after initial failure`,
+      );
+      connected.push({ iface, entry: failure.entry });
+    } else {
+      stillFailed.push({
+        entry: failure.entry,
+        type: failure.type,
+        error: result.errors[0] ? result.errors[0].error : failure.error,
+      });
+    }
+  }
+  return { connected, stillFailed, unfixable };
+}
+
 module.exports = {
   DEFAULT_INTERFACES,
+  RETRY_INTERVAL_MS,
   getDefaultInterfaces,
   interfacesFromConfig,
   effectiveInterfaces,
   optionsFromEntry,
   setupInterfaces,
+  listSerialPorts,
+  retryFailedInterfaces,
 };

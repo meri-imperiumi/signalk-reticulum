@@ -188,8 +188,19 @@ function watchOutboundFreeze({
   const tick = async () => {
     if (stopped) return;
     for (const entry of interfaces) {
-      const s = state.get(entry.label);
-      if (!s) continue;
+      let s = state.get(entry.label);
+      if (!s) {
+        // Late addition: an interface brought up by the background retry loop
+        // after the watchdog was constructed. Track it like the rest instead
+        // of silently skipping it forever.
+        s = {
+          counter: transmittedBytes(entry.iface),
+          since: Date.now(),
+          phase: "ok",
+          lastSwapAt: 0,
+        };
+        state.set(entry.label, s);
+      }
       const iface = entry.iface;
       if (!iface || !iface.online) {
         // Offline interfaces reconnect on their own; nothing to recover.

@@ -100,7 +100,7 @@ function getInterfaceStats(iface) {
  *   configured or auto-discovered *external* LXMF propagation node this
  *   plugin uses as a store-and-forward client (null when none/unknown);
  *   only surfaced when no embedded propagation node is running
- * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
+ * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], interfacesFailed: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
  */
 async function getStatus(
   rns,
@@ -112,6 +112,7 @@ async function getStatus(
   identity,
   displayName,
   clientPropagationNode = null,
+  failedInterfaces = [],
 ) {
   const interfaces = [];
   let interfacesConnected = 0;
@@ -203,6 +204,11 @@ async function getStatus(
     identityHash: identity?.identityHash ? toHex(identity.identityHash) : "",
     displayName: displayName || "",
     interfaces,
+    interfacesFailed: failedInterfaces.map((failure) => ({
+      type: failure.type ?? "unknown",
+      name: (failure.entry && failure.entry.name) || failure.type || "unknown",
+      error: failure.error || "unknown error",
+    })),
     links,
     destinationsKnown,
     interfacesConnected,
@@ -246,6 +252,7 @@ async function formatStatusValues(
   displayName,
   health,
   clientPropagationNode = null,
+  failedInterfaces = [],
 ) {
   const status = await getStatus(
     rns,
@@ -257,6 +264,7 @@ async function formatStatusValues(
     identity,
     displayName,
     clientPropagationNode,
+    failedInterfaces,
   );
   const values = [
     {
@@ -270,6 +278,14 @@ async function formatStatusValues(
     {
       path: "communication.reticulum.interfacesConnected",
       value: status.interfacesConnected,
+    },
+    {
+      path: "communication.reticulum.interfacesFailed",
+      value: status.interfacesFailed.map((failure) => ({
+        type: failure.type,
+        name: failure.name,
+        error: failure.error,
+      })),
     },
     {
       path: "communication.reticulum.links",
@@ -440,6 +456,16 @@ function getStatusMetadata() {
         displayName: "Interfaces connected",
         description: "Number of interfaces currently online",
         units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.interfacesFailed",
+      value: {
+        displayName: "Interfaces failed",
+        description:
+          "Interfaces that failed to connect and are being retried in the " +
+          "background — inspect `error` for the cause (e.g. a wrong serial " +
+          "port)",
       },
     },
     {

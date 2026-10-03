@@ -9,6 +9,8 @@ const {
   effectiveInterfaces,
   optionsFromEntry,
   setupInterfaces,
+  retryFailedInterfaces,
+  listSerialPorts,
 } = require("../plugin/interfaces");
 const {
   Reticulum,
@@ -150,6 +152,135 @@ test("setupInterfaces records a connect failure, attempts cleanup, and keeps goi
   assert.match(result.errors[0].error, /Failed to connect "tcp-client"/);
   // The failed interface was cleaned up via disconnect.
   assert.equal(bad.disconnectedByCleanup, undefined); // sanity
+});
+
+test("setupInterfaces logs candidate serial ports when an rnode-serial interface fails", async () => {
+  const bad = makeFakeInterfaceClass("rnode-serial", { connectThrows: true });
+  const rns = makeFakeRns();
+  const logs = [];
+
+  await setupInterfaces(
+    rns,
+    [{ type: "rnode-serial", name: "rnode-usb", port: "/dev/ttyUSB0" }],
+    () => bad,
+    (msg) => logs.push(msg),
+    () => ["/dev/serial/by-id/silabs-rnode", "/dev/ttyUSB0"],
+  );
+
+  const hint = logs.find((msg) => msg.includes("Available serial ports"));
+  assert.ok(hint, "expected a serial-port hint in the failure log");
+  assert.match(hint, /rnode-usb/);
+  assert.match(hint, /\/dev\/serial\/by-id\/silabs-rnode/);
+  assert.match(hint, /\/dev\/serial\/by-id/);
+});
+
+test("setupInterfaces does not log a serial-port hint for other types", async () => {
+  const bad = makeFakeInterfaceClass("tcp-client", { connectThrows: true });
+  const rns = makeFakeRns();
+  const logs = [];
+
+  await setupInterfaces(
+    rns,
+    [{ type: "tcp-client" }],
+    () => bad,
+    (msg) => logs.push(msg),
+    () => ["/dev/ttyUSB0"],
+  );
+
+  assert.ok(!logs.some((msg) => msg.includes("Available serial ports")));
+});
+
+test("listSerialPorts prefers stable by-id names and falls back to tty devices", () => {
+  const ports = listSerialPorts((dir) => {
+    if (dir === "/dev/serial/by-id") {
+      return ["usb-Silicon_Labs_rnode_0001-if00-port0"];
+    }
+    if (dir === "/dev") {
+      return [
+        "ttyUSB0",
+        "ttyACM1",
+        "cu.usbserial-0001",
+        "ttyS0",
+        "null",
+        "random.txt",
+      ];
+    }
+    throw new Error(`unexpected dir ${dir}`);
+  });
+
+  assert.ok(
+    ports.includes("/dev/serial/by-id/usb-Silicon_Labs_rnode_0001-if00-port0"),
+  );
+  assert.ok(ports.includes("/dev/ttyUSB0"));
+  assert.ok(ports.includes("/dev/ttyACM1"));
+  assert.ok(ports.includes("/dev/cu.usbserial-0001"));
+  assert.ok(!ports.includes("/dev/ttyS0"));
+  assert.ok(!ports.includes("/dev/random.txt"));
+});
+
+test("listSerialPorts returns an empty list when nothing can be scanned", () => {
+  assert.deepEqual(
+    listSerialPorts(() => {
+      throw new Error("no such directory");
+    }),
+    [],
+  );
+});
+
+test("retryFailedInterfaces brings a failed interface up on a later attempt", async () => {
+  let throws = true;
+  const cls = makeFakeInterfaceClass("rnode-serial");
+  const originalConnect = cls.prototype.connect;
+  cls.prototype.connect = async function () {
+    if (throws) throw new Error("Could not detect RNode device");
+    return originalConnect.call(this);
+  };
+  const getInterface = () => cls;
+  const rns = makeFakeRns();
+  const entry = {
+    type: "rnode-serial",
+    name: "rnode-usb",
+    port: "/dev/ttyUSB0",
+  };
+
+  // Initial setup fails, as it would at plugin start with a still-booting radio.
+  const first = await setupInterfaces(rns, [entry], getInterface);
+  assert.equal(first.connected.length, 0);
+  assert.equal(first.errors.length, 1);
+
+  // The device becomes ready; the retry brings the interface up.
+  throws = false;
+  const retried = await retryFailedInterfaces(rns, first.errors, getInterface);
+  assert.equal(retried.connected.length, 1);
+  assert.equal(retried.connected[0].entry, entry);
+  assert.equal(retried.stillFailed.length, 0);
+  assert.equal(retried.unfixable.length, 0);
+  assert.equal(rns.added.length, 1);
+});
+
+test("retryFailedInterfaces keeps still-failing entries and reports unknown types as unfixable", async () => {
+  const bad = makeFakeInterfaceClass("rnode-serial", { connectThrows: true });
+  const getInterface = (id) => (id === "rnode-serial" ? bad : undefined);
+  const rns = makeFakeRns();
+  const failures = [
+    { entry: { type: "rnode-serial" }, type: "rnode-serial", error: "boom" },
+    {
+      entry: { type: "nope" },
+      type: "nope",
+      error: 'Unknown interface type "nope"',
+    },
+  ];
+
+  const retried = await retryFailedInterfaces(rns, failures, getInterface);
+
+  assert.equal(retried.connected.length, 0);
+  assert.equal(retried.stillFailed.length, 1);
+  assert.equal(retried.stillFailed[0].type, "rnode-serial");
+  assert.match(retried.stillFailed[0].error, /connect boom/);
+  // Unknown types can never succeed, so they are not retried.
+  assert.equal(retried.unfixable.length, 1);
+  assert.equal(retried.unfixable[0].type, "nope");
+  assert.equal(rns.added.length, 0);
 });
 
 test("interfacesFromConfig flattens the per-type arrays into typed entries", () => {

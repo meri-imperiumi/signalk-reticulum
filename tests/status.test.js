@@ -51,6 +51,57 @@ test("`formatStatusValues handles null/undefined RNS returns null/undefined RNS"
   assert.equal(identityHash.value, "");
 });
 
+test("formatStatusValues publishes failed interfaces with their error", async () => {
+  const values = await formatStatusValues(
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    [
+      {
+        type: "rnode-serial",
+        entry: { type: "rnode-serial", name: "rnode-usb" },
+        error:
+          "Could not detect RNode device for rnode-usb " +
+          "(no data received on the port — wrong port?)",
+      },
+    ],
+  );
+
+  const failed = values.find(
+    (v) => v.path === "communication.reticulum.interfacesFailed",
+  );
+  assert.ok(failed, "interfacesFailed value missing");
+  assert.equal(failed.value.length, 1);
+  assert.equal(failed.value[0].type, "rnode-serial");
+  assert.equal(failed.value[0].name, "rnode-usb");
+  assert.match(failed.value[0].error, /no data received/);
+});
+
+test("formatStatusValues publishes an empty interfacesFailed list when all interfaces are up", async () => {
+  const values = await formatStatusValues(null, null, null, null);
+  const failed = values.find(
+    (v) => v.path === "communication.reticulum.interfacesFailed",
+  );
+  assert.ok(failed);
+  assert.deepEqual(failed.value, []);
+});
+
+test("getStatus metadata documents the interfacesFailed path", () => {
+  const metadata = getStatusMetadata();
+  const entry = metadata.find(
+    (m) => m.path === "communication.reticulum.interfacesFailed",
+  );
+  assert.ok(entry, "interfacesFailed metadata missing");
+  assert.ok(entry.value.description);
+});
+
 test("formatStatusValues extracts interface info", async () => {
   const mockIdentity = {
     identityHash: Buffer.from("0123456789abcdef0123456789abcdef", "hex"),

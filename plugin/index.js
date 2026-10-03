@@ -17,8 +17,13 @@ const {
   EXCLUDED_INTERFACE_IDS,
 } = require("./schema");
 const { resolveIdentity } = require("./identity");
-const { effectiveInterfaces, setupInterfaces, interfacesFromConfig } =
-  require("./interfaces");
+const {
+  effectiveInterfaces,
+  setupInterfaces,
+  retryFailedInterfaces,
+  RETRY_INTERVAL_MS,
+  interfacesFromConfig,
+} = require("./interfaces");
 const { sendNotification, sweepNotifications } = require("./notifications");
 const {
   setupMessaging,
@@ -480,6 +485,7 @@ module.exports = (app) => {
       plugin.identity = undefined;
       plugin.rns = undefined;
       plugin.interfaces = [];
+      plugin.interfacesFailed = [];
       plugin.lxmf = undefined;
       plugin.nomadnet = undefined;
       plugin.rfed = undefined;
@@ -655,6 +661,87 @@ module.exports = (app) => {
             }
           }
           plugin.interfaces = connected;
+
+          // Background retry for interfaces that failed their initial
+          // bring-up. Serial radios (e.g. an RNode over USB) are routinely
+          // not ready when the plugin starts — the device may still be
+          // booting after the port-open reset, USB enumeration may be late
+          // on a freshly booted Venus OS box, or the device may be plugged
+          // in afterwards. A failed first attempt is therefore retried
+          // periodically until it comes up or the plugin stops, instead of
+          // staying dead until restart.
+          const snapshotFailures = (failures) => {
+            plugin.interfacesFailed = failures.map((failure) => ({
+              type: failure.type,
+              entry: failure.entry,
+              error: failure.error,
+            }));
+          };
+          let retryFailures = setupErrors.filter(
+            (failure) => failure && failure.entry,
+          );
+          snapshotFailures(retryFailures);
+          if (retryFailures.length > 0) {
+            app.debug(
+              `${retryFailures.length} interface(s) failed initial setup; retrying every ${RETRY_INTERVAL_MS / 1000}s`,
+            );
+            const retryTimer = setInterval(async () => {
+              const pending = retryFailures;
+              retryFailures = [];
+              try {
+                const {
+                  connected: retried,
+                  stillFailed,
+                  unfixable,
+                } = await retryFailedInterfaces(
+                  rns,
+                  pending,
+                  deps.getInterface,
+                  app.debug,
+                );
+                for (const { iface, entry } of retried) {
+                  plugin.interfaces.push(iface);
+                  recoveryInterfaces.push({
+                    iface,
+                    label: `${entry.type}`,
+                    buildReplacement: async (oldIface) => {
+                      try {
+                        rns.removeInterface(oldIface);
+                      } catch {
+                        /* already detached */
+                      }
+                      try {
+                        await oldIface.disconnect();
+                      } catch {
+                        /* best effort */
+                      }
+                      const rebuilt = await setupInterfaces(
+                        rns,
+                        [entry],
+                        deps.getInterface,
+                        () => {},
+                      );
+                      return rebuilt.connected[0] ?? null;
+                    },
+                  });
+                }
+                const nowFailed = [...stillFailed, ...unfixable];
+                if (retried.length > 0 || nowFailed.length !== pending.length) {
+                  app.debug(
+                    `Interface retry: ${retried.length} connected, ${nowFailed.length} still failing`,
+                  );
+                }
+                snapshotFailures(nowFailed);
+                retryFailures = stillFailed;
+              } catch (e) {
+                app.debug(`Interface retry error: ${e.message}`);
+                retryFailures = pending;
+              }
+            }, RETRY_INTERVAL_MS);
+            // Keep the timer handle out of the event loop when stopped.
+            retryTimer.unref();
+            unsubscribes.push(() => clearInterval(retryTimer));
+          }
         }
 
         // Resolve the periodic re-announce cadence so both the LXMF and
@@ -1935,6 +2022,7 @@ module.exports = (app) => {
       plugin.identity = undefined;
       plugin.rns = undefined;
       plugin.interfaces = [];
+      plugin.interfacesFailed = [];
       app.setPluginStatus("Stopped");
     },
 

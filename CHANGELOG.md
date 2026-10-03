@@ -1,5 +1,9 @@
 # Changelog
 ## [Unreleased]
+### Added
+- **Failed interfaces are retried in the background instead of staying dead until plugin restart.** Previously each configured interface got exactly one bring-up attempt at plugin start; a failure (an RNode still booting after the port-open reset, USB enumeration arriving late on a freshly booted Venus OS box, the radio plugged in afterwards, or the port briefly held by another process) was final — and the failure-path `disconnect()` even cancelled the interface's own auto-reconnect loop. Failed setups are now retried every 60 s in the background; once an interface connects it is attached to the node and enrolled in the outbound-freeze watchdog like any other (the watchdog now tracks interfaces added after its construction instead of skipping them). Config entries with an unknown interface type are detected as unfixable and excluded from retries
+- **Serial-port hint next to RNode serial failures.** When an `rnode-serial` interface fails to connect, the plugin now logs the candidate serial devices — `/dev/serial/by-id/*` (stable names; the recommended `port` value on Linux, since `/dev/ttyUSB0` numbering depends on enumeration order and is routinely claimed by another dongle such as the Venus OS console or a VE.Direct adapter) plus `/dev/ttyUSB*`/`/dev/ttyACM*` (and `/dev/cu.usb*` on macOS) — together with the error, so the wrong-port failure class is diagnosable from the log alone
+- **Failed interfaces are visible in Signal K status**: the new `communication.reticulum.interfacesFailed` path (plus matching metadata) lists interfaces that failed to connect and are being retried, each with its type, configured name and the underlying error (e.g. "no data received on the port — wrong port?") — instead of the failure being buried in the plugin log while the status view only shows the interfaces that did come up
 
 ## [0.6.4] - 2026-10-03
 ### Added
