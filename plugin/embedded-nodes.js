@@ -43,7 +43,7 @@ const deps = {
  *
  * The propagation node is configured with:
  * - A disk-persisted message store (if storage is available)
- * - Configurable stamp cost (default 8)
+ * - Configurable stamp cost (default 16)
  * - Autopeering disabled by default (can be enabled in config)
  * - Static propagation peers (optional)
  *
@@ -79,7 +79,7 @@ async function setupEmbeddedPropagationNode({
     return { node: null, teardown: () => {} };
   }
 
-  const stampCost = Number(propConfig.stamp_cost) || 8;
+  const stampCost = Number(propConfig.stamp_cost) || 16;
   const peeringCost = Number(propConfig.peering_cost) || 18;
   const autopeer = !!propConfig.autopeer;
   const autopeerMaxCost = Number(propConfig.autopeer_max_cost) || 18;

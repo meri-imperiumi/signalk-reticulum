@@ -658,8 +658,11 @@ function buildPluginSchema(interfaces) {
                 description:
                   "Proof-of-work leading-zero bits required for messages " +
                   "submitted to this propagation node. Set to 0 to disable. " +
-                  "Defaults to 8 bits.",
-                default: 8,
+                  "Defaults to 16 bits — Python LXMF nodes refuse to accept " +
+                  "propagated messages with stamps below 13 bits and peer " +
+                  "nodes reject under-stamped transfers, so values below 13 " +
+                  "leave messages stranded on this node.",
+                default: 16,
                 minimum: 0,
                 maximum: 32,
               },
