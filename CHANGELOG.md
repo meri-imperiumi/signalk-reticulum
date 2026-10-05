@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.6.8] - 2026-10-06
 ### Changed
 - Updated `@reticulum` dependencies to **0.9.7**, which fixes the "Assembly failed: Resource is compressed but no bz2 module was provided" errors on compressed inbound Resource transfers (Reticulum PROTOCOL-SPEC.md §10.2). Router-initiated links now carry the compression provider, so responses from nodes that auto-compress — the Python reference (`RNS.Resource(auto_compress=True)`) does by default — can be assembled: the outbound propagation link used by `syncFromPropagationNode` (its `/get` responses and acks), DIRECT delivery links (a peer may send large LXMF messages back over the link we initiated), `LXMPeer` peer-sync links, and every `RFedClient` link (subscribe, unsubscribe, pull, notify, oversized publish). Previously only the propagation *submit* and inbound link-accept paths had the provider wired, so a sync from a Python propagation node failed assembly, the pending request never resolved and the sync timed out — silently retrying forever. The plugin's own bz2 wiring (`rns.compressionProvider` via `@digitaldefiance/bzip2-wasm`) is unchanged
 
