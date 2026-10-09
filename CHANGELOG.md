@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+### Added
+- **`Log` command**: crew can now keep the boat logbook updated over the mesh by sending a `log <text>` LXMF message, which appends a manual entry to the logbook through the `logentries` resource API (the signalk-logbook plugin), mirroring the fresh `signalk-meshtastic` log command. A hashtag in the text like `#maintenance` sets the entry category and is stripped from the entry text, wherever it appears. As with every command the entry is credited properly: it is authored to the configured name of the sending crew member (matched by the derived `lxmf.delivery` hash, so identity-configured crew entries work too) — a crew entry with no real name configured leaves the entry unauthored rather than crediting a hash. The reply confirms the outcome: `OK, logged`, `Nothing to log` for hashtag-only texts, `Logbook not available` when no resource provider serves `logentries`, or the underlying error if the write fails. Crew-only, like digital switching; covered by `tests/log-command.test.js`
 
 ## [0.6.8] - 2026-10-06
 ### Changed

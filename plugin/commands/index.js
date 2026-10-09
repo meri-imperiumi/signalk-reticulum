@@ -23,6 +23,7 @@ const commands = {
   ping: require("./ping"),
   status: require("./status"),
   switching: require("./switching"),
+  log: require("./log"),
 };
 
 /**
