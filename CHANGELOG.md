@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.7.1] - 2026-10-12
 ### Fixed
 - **The NomadNet index's Crew-section links actually navigate now.** The crew page links were rendered with Markdown syntax (`[Passage briefing](/page/briefing.mu)`), which Micron — the NomadNet page markup — does not understand: the page showed literal text and tapping it did nothing. Links now use Micron's backtick form (`[Passage briefing\`/page/briefing.mu]`)
 - **Markdown LXMF replies keep their line breaks.** The `Status` and `Briefing` replies are joined with Markdown hard line breaks (two trailing spaces before the newline, CommonMark) instead of bare newlines: a bare newline is a *soft* break, which Markdown renderers collapse into a space — Columba's renderer (multiplatform-markdown-renderer, default `eolAsNewLine: false`) and Sideband's both rendered the whole multi-line report jumbled onto one line. Hard breaks render as real line breaks in every CommonMark client and stay invisible in the plain-text fallback (trailing spaces don't show); the wording is unchanged and still identical to the NomadNet pages' lines. `Help`'s bullet list needed no change — list items are structural, not soft-wrapped paragraphs
