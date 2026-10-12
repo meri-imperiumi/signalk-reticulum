@@ -64,6 +64,8 @@ test("help lists the crew-only commands too for crew", async () => {
     "Ping",
     "Status",
     "Briefing",
+    "Subscribe briefing",
+    "Unsubscribe briefing",
     "Turn <switch name> on",
     "Log <text>",
     "Help",

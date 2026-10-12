@@ -43,7 +43,9 @@ const {
   briefMeta,
   briefingPage,
   briefingAvailable,
+  META_GENERATED_AT,
 } = require("./briefing");
+const { queueBriefingDispatch } = require("./brief-subscriptions");
 const compression = require("./compression");
 const { resolveDisplayName } = require("./displayname");
 const { resolveAppearance } = require("./appearance");
@@ -1837,6 +1839,83 @@ module.exports = (app) => {
           ).catch((e) => app.debug(`Notification sweep error: ${e.message}`));
         }, 60000);
         unsubscribes.push(() => clearInterval(notificationSweepTimer));
+
+        // Daily crew briefing push: whenever the signalk-passage-briefing
+        // plugin compiles a fresh payload it stamps
+        // `navigation.briefing.generatedAt` on the bus, and subscribed crew
+        // members (the "Subscribe briefing" command) then receive exactly
+        // that compile — maximally fresh, at most once per day (the day gate
+        // lives in the persisted subscription store, so restarts neither
+        // lose nor double the day's briefing). Dispatches are serialized and
+        // failures are per-recipient, like the notification forwards.
+        if (app.subscriptionmanager) {
+          try {
+            app.subscriptionmanager.subscribe(
+              {
+                context: "vessels.self",
+                subscribe: [{ path: META_GENERATED_AT, policy: "instant" }],
+              },
+              unsubscribes,
+              (err) => app.error(`Briefing subscription error: ${err}`),
+              (delta) => {
+                if (!delta || !delta.updates) {
+                  return;
+                }
+                for (const update of delta.updates) {
+                  if (!update.values) {
+                    continue;
+                  }
+                  for (const v of update.values) {
+                    if (v.path !== META_GENERATED_AT) {
+                      continue;
+                    }
+                    Promise.resolve(
+                      queueBriefingDispatch({
+                        settings: config,
+                        deliver: (dest, title, content) =>
+                          deps.withTimeout(
+                            () =>
+                              deliver(dest, title, content, null, {
+                                markdown: true,
+                              }),
+                            120_000,
+                            "daily briefing delivery",
+                          ),
+                        app,
+                        log: app.debug,
+                      }),
+                    ).catch((e) =>
+                      app.debug(`Daily briefing dispatch error: ${e.message}`),
+                    );
+                  }
+                }
+              },
+            );
+          } catch (e) {
+            app.debug(`Briefing subscription error: ${e.message}`);
+          }
+        }
+        // Startup catch-up: a restart between this morning's compile and now
+        // must still deliver today's briefing to subscribers who have not
+        // had it. The day gate makes this a no-op when everyone is current.
+        const briefingCatchup = setTimeout(() => {
+          Promise.resolve(
+            queueBriefingDispatch({
+              settings: config,
+              deliver: (dest, title, content) =>
+                deps.withTimeout(
+                  () => deliver(dest, title, content, null, { markdown: true }),
+                  120_000,
+                  "daily briefing delivery",
+                ),
+              app,
+              log: app.debug,
+            }),
+          ).catch((e) =>
+            app.debug(`Daily briefing catch-up error: ${e.message}`),
+          );
+        }, 15000);
+        unsubscribes.push(() => clearTimeout(briefingCatchup));
 
         // Re-announce every destination immediately when any configured
         // connectivity indicator changes (Starlink dropping, an LTE modem

@@ -15,6 +15,8 @@ const commands = {
   ping: require("./ping"),
   status: require("./status"),
   briefing: require("./briefing"),
+  briefingSubscribe: require("./briefing-subscribe"),
+  briefingUnsubscribe: require("./briefing-unsubscribe"),
   switching: require("./switching"),
   log: require("./log"),
   help: require("./help"),
