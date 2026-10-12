@@ -566,7 +566,7 @@ test("renderPage omits individual readings that are not available", () => {
   assert.equal(page, ">>Boat\n\n>Vessel status\nVessel is moored\n");
 });
 
-test("renderPage renders crew page links as a Crew section", () => {
+test("renderPage renders crew page links as Micron links in a Crew section", () => {
   const page = renderPage({
     vesselName: "Boat",
     crewPages: [
@@ -574,40 +574,19 @@ test("renderPage renders crew page links as a Crew section", () => {
       { path: "/page/watch.mu", label: "Watch plan" },
     ],
   });
+  // Micron link syntax [label`target], backtick-separated — NOT Markdown's
+  // [label](target), which Micron renders as literal text
   assert.equal(
     page,
-    ">>Boat\n\n>Crew\n[Passage briefing](/page/briefing.mu)\n[Watch plan](/page/watch.mu)\n",
-  );
-});
-
-test("renderPage omits the Crew section entirely when it is empty or absent", () => {
-  assert.equal(renderPage({ vesselName: "Boat", crewPages: [] }), ">>Boat\n");
-  assert.equal(renderPage({ vesselName: "Boat" }), ">>Boat\n");
-  // Malformed entries are skipped, not rendered as broken links: with no
-  // valid link left there is no section at all
-  assert.equal(
-    renderPage({ vesselName: "Boat", crewPages: [{ label: "No path" }, null] }),
-    ">>Boat\n",
-  );
-});
-
-test("renderPage renders crew page links as a Crew section", () => {
-  const page = renderPage({
-    vesselName: "Boat",
-    crewPages: [
-      { path: "/page/briefing.mu", label: "Passage briefing" },
-      { path: "/page/watch.mu", label: "Watch plan" },
-    ],
-  });
-  assert.equal(
-    page,
-    ">>Boat\n\n>Crew\n[Passage briefing](/page/briefing.mu)\n[Watch plan](/page/watch.mu)\n",
+    ">>Boat\n\n>Crew\n[Passage briefing`/page/briefing.mu]\n[Watch plan`/page/watch.mu]\n",
   );
 });
 
 test("renderPage omits the Crew section entirely when it is empty, absent or has no valid links", () => {
   assert.equal(renderPage({ vesselName: "Boat", crewPages: [] }), ">>Boat\n");
   assert.equal(renderPage({ vesselName: "Boat" }), ">>Boat\n");
+  // Malformed entries are skipped, not rendered as broken links: with no
+  // valid link left there is no section at all
   assert.equal(
     renderPage({ vesselName: "Boat", crewPages: [{ label: "No path" }, null] }),
     ">>Boat\n",

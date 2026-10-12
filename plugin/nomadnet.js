@@ -513,7 +513,10 @@ function renderPage(context = {}) {
     lines.push("");
     lines.push(">Crew");
     for (const page of crewPages) {
-      lines.push(`[${page.label}](${page.path})`);
+      // Micron link syntax: [label`target], backtick-separated (NOT Markdown's
+      // [label](target) — Micron has no parentheses form, so that rendered as
+      // literal text and the link did nothing when tapped).
+      lines.push(`[${page.label}\`${page.path}]`);
     }
   }
 
