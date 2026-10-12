@@ -45,6 +45,18 @@ const RAD_TO_DEG = 180 / Math.PI;
 const TELEMETRY_SECTION = ">Vessel status";
 
 /**
+ * The signalk-energy-predictor plugin publishes its overall 24 hour energy
+ * outlook here as a plain string: "surplus", "rising", "stable", "deficit"
+ * or "critical".
+ */
+const ENERGY_OUTLOOK_PATH = "electrical.energy.prediction.status";
+/**
+ * The signalk-status-tiles plugin publishes each tile's aggregated state as a
+ * plain string under this branch, one path per tile id.
+ */
+const TILE_STATUS_BASE = "statusTiles.tiles";
+
+/**
  * Coerces a Signal K self-path value into a finite number, tolerating plain
  * numbers and `{value}` update wrappers. Returns `undefined` for missing,
  * non-numeric or non-finite values so callers can omit the field.
@@ -217,12 +229,20 @@ function formatWind(speedMs, directionRad) {
  * Renders the house battery as "Battery: 87 %, 2.3 A", converting the state of
  * charge from a 0–1 decimal to a percentage. Either part may be absent.
  *
+ * The energy predictor's overall outlook describes the same house bank, so
+ * when available it rides along at the end of the line as
+ * "Battery: 87 %, 2.3 A, surplus" (or rising, stable, deficit, critical).
+ * Without charge or current there is nowhere natural to put the term, so it
+ * is left out — mirroring the `signalk-meshtastic` status command.
+ *
  * @param {unknown} stateOfCharge - Value at
  *   `electrical.batteries.house.capacity.stateOfCharge` (0–1).
  * @param {unknown} current - Value at `electrical.batteries.house.current` (A).
+ * @param {unknown} outlook - Value at `electrical.energy.prediction.status`,
+ *   already normalized to a plain non-empty string (or empty when absent).
  * @returns {string} Empty when neither charge nor current is reported.
  */
-function formatBattery(stateOfCharge, current) {
+function formatBattery(stateOfCharge, current, outlook) {
   const soc = readNumber(stateOfCharge);
   const cur = readNumber(current);
   if (soc === undefined && cur === undefined) {
@@ -235,14 +255,132 @@ function formatBattery(stateOfCharge, current) {
   if (cur !== undefined) {
     parts.push(`${cur.toFixed(1)} A`);
   }
+  if (outlook) {
+    parts.push(outlook);
+  }
   return `Battery: ${parts.join(", ")}`;
 }
 
 /**
+ * Unwraps a Signal K leaf node — a plain value or a `{value}` update wrapper —
+ * to its raw value. Used for the tile subtree, where each tile id maps to
+ * either shape depending on the server.
+ *
+ * @param {unknown} node
+ * @returns {unknown}
+ */
+function leafValue(node) {
+  if (node === null || node === undefined) {
+    return undefined;
+  }
+  if (typeof node === "object" && "value" in node) {
+    return node.value;
+  }
+  return node;
+}
+
+/**
+ * Reads the status tile subtree into `{id, state}` pairs, keeping only tiles
+ * that report a plain string state.
+ *
+ * Tile states are change-driven publications, so a green tile may not have
+ * sent anything in a long time. That is fine: green means nothing needs
+ * attention, and there is nothing to go stale about that.
+ *
+ * Tile labels live in the tiles configuration, not on the bus, so tiles are
+ * named by id.
+ *
+ * @param {unknown} tiles - Value at `statusTiles.tiles` (the subtree of leaf
+ *   nodes `getSelfPath` returns for an intermediate path).
+ * @returns {{id: string, state: string}[]}
+ */
+function tileStatuses(tiles) {
+  if (!tiles || typeof tiles !== "object" || Array.isArray(tiles)) {
+    return [];
+  }
+  return Object.keys(tiles)
+    .map((id) => ({ id, state: leafValue(tiles[id]) }))
+    .filter((tile) => typeof tile.state === "string");
+}
+
+/**
+ * Renders one line summarising every status tile: which are red or amber when
+ * there are any ("Systems: red housebank; amber bilge"), "Systems: all green"
+ * when the monitored systems are fine, and nothing at all on a boat without
+ * status tiles configured. Tiles in the opportunity or neutral (context
+ * inactive) states are neither problems nor green, so they are ignored.
+ *
+ * @param {unknown} tiles - Value at `statusTiles.tiles`.
+ * @returns {string} Empty when there is nothing to report.
+ */
+function systemsStatus(tiles) {
+  const problems = { red: [], amber: [] };
+  let green = 0;
+  tileStatuses(tiles).forEach(({ id, state }) => {
+    if (state === "red" || state === "amber") {
+      problems[state].push(id);
+      return;
+    }
+    if (state === "green") {
+      green += 1;
+    }
+  });
+  const groups = ["red", "amber"]
+    .filter((state) => problems[state].length)
+    .map((state) => `${state} ${problems[state].join(", ")}`);
+  if (groups.length) {
+    return `Systems: ${groups.join("; ")}`;
+  }
+  if (green) {
+    return "Systems: all green";
+  }
+  return "";
+}
+
+/** Micron foreground escape for the red groups (3-digit RGB nibble form). */
+const MICRON_RED = "`F900";
+/** Micron foreground escape for the amber groups. */
+const MICRON_AMBER = "`Faa0";
+/** Micron foreground escape for the all-green summary. */
+const MICRON_GREEN = "`F0a0";
+/** Micron escape ending a colored span. */
+const MICRON_RESET = "`f";
+
+/**
+ * Adds micron foreground-color escapes to a systems summary line so the
+ * NomadNet page shows problems in red or amber and a healthy boat in green.
+ * Any other line passes through untouched.
+ *
+ * The colored form is only for the micron page: the LXMF `Status` command
+ * reply keeps the plain text {@link systemsStatus} produces.
+ *
+ * @param {string} line - A line from {@link telemetryLines}.
+ * @returns {string} The line, colorized when it is the systems summary.
+ */
+function colorizeSystems(line) {
+  if (line === "Systems: all green") {
+    return `Systems: ${MICRON_GREEN}all green${MICRON_RESET}`;
+  }
+  if (!line.startsWith("Systems: ")) {
+    return line;
+  }
+  const groups = line
+    .slice("Systems: ".length)
+    .split("; ")
+    .map((group) => {
+      const state = group.split(" ")[0];
+      const color =
+        state === "red" ? MICRON_RED : state === "amber" ? MICRON_AMBER : null;
+      return color ? `${color}${group}${MICRON_RESET}` : group;
+    });
+  return `Systems: ${groups.join("; ")}`;
+}
+
+/**
  * Renders the vessel-status body lines — state, position, anchor, depth,
- * tide, wind, house battery — one plain line per available reading, absent
- * readings omitted so neither the NomadNet page nor a Status command reply
- * ever shows empty placeholders.
+ * tide, wind, house battery, status tiles — one plain line per available
+ * reading, absent readings omitted so neither the NomadNet page nor a Status
+ * command reply ever shows empty placeholders.
  *
  * This is the single source of truth for "the vessel data we publish": the
  * micron page renders these lines under its "Vessel status" header, and the
@@ -252,7 +390,7 @@ function formatBattery(stateOfCharge, current) {
  * @param {object} [telemetry] - Raw Signal K self-path values, as built by
  *   {@link telemetryContext}. The `position` key takes the
  *   `navigation.position` object (`{latitude, longitude}`, optionally
- *   `{value}` wrapped).
+ *   `{value}` wrapped); the `tiles` key takes the `statusTiles.tiles` subtree.
  * @returns {string[]} The non-empty formatted lines.
  */
 function telemetryLines(telemetry = {}) {
@@ -264,7 +402,12 @@ function telemetryLines(telemetry = {}) {
     formatDepth(tel.depth),
     formatTide(tel.tideHeight, tel.tideState),
     formatWind(tel.windSpeed, tel.windDirection),
-    formatBattery(tel.batterySoc, tel.batteryCurrent),
+    formatBattery(
+      tel.batterySoc,
+      tel.batteryCurrent,
+      readString(tel.energyOutlook),
+    ),
+    systemsStatus(tel.tiles),
   ].filter((line) => line && line.trim() !== "");
 }
 
@@ -272,8 +415,10 @@ function telemetryLines(telemetry = {}) {
  * Reads the boat's current telemetry from Signal K — the exact keys the
  * NomadNet index page renders — into the raw-value object
  * {@link telemetryLines} formats. Each entry is the untouched `getSelfPath`
- * result (plain value or `{value}` update wrapper); the formatters unwrap and
- * coerce from there, and drop anything missing or non-numeric.
+ * result (plain value or `{value}` update wrapper; for the `tiles` key the
+ * `statusTiles.tiles` subtree `getSelfPath` returns for an intermediate
+ * path); the formatters unwrap and coerce from there, and drop anything
+ * missing or non-numeric.
  *
  * Tolerates servers (and test fakes) that do not expose `getSelfPath` by
  * returning all-`undefined` readings, which render as no lines at all.
@@ -303,6 +448,8 @@ function telemetryContext(app) {
     windDirection: read("environment.wind.directionTrue"),
     batterySoc: read("electrical.batteries.house.capacity.stateOfCharge"),
     batteryCurrent: read("electrical.batteries.house.current"),
+    energyOutlook: read(ENERGY_OUTLOOK_PATH),
+    tiles: read(TILE_STATUS_BASE),
   };
 }
 
@@ -341,7 +488,7 @@ function renderPage(context = {}) {
   if (body.length) {
     lines.push("");
     lines.push(TELEMETRY_SECTION);
-    lines.push(...body);
+    lines.push(...body.map(colorizeSystems));
   }
 
   const footer = readString(cfg.footer);
@@ -614,4 +761,7 @@ module.exports = {
   formatTide,
   formatWind,
   formatBattery,
+  tileStatuses,
+  systemsStatus,
+  colorizeSystems,
 };

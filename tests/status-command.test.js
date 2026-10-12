@@ -131,3 +131,60 @@ test("status replies to the sender's source hash and forwards the link id", asyn
   assert.equal(calls[0].destHash, SOURCE_HEX);
   assert.equal(calls[0].linkId, linkId, "link id threaded into deliver");
 });
+
+test("status appends the energy predictor outlook to the battery line", async () => {
+  const { deliver, calls } = makeDeliver();
+  const app = makeApp({
+    "electrical.batteries.house.capacity.stateOfCharge": { value: 0.873 },
+    "electrical.energy.prediction.status": { value: "surplus" },
+  });
+  await status.handle(makeMessage("status"), {}, deliver, app);
+  assert.equal(calls[0].content, "Battery: 87 %, surplus");
+});
+
+test("status reports the plain battery line without the energy predictor", async () => {
+  const { deliver, calls } = makeDeliver();
+  const app = makeApp({
+    "electrical.batteries.house.capacity.stateOfCharge": { value: 0.873 },
+  });
+  await status.handle(makeMessage("status"), {}, deliver, app);
+  assert.equal(calls[0].content, "Battery: 87 %");
+});
+
+test("status summarizes the status tiles when the plugin publishes them", async () => {
+  const { deliver, calls } = makeDeliver();
+  const app = makeApp({
+    // What getSelfPath returns for an intermediate path: the subtree of leaf
+    // nodes below it
+    "statusTiles.tiles": {
+      housebank: { value: "red" },
+      bilge: { value: "amber" },
+      watermaker: { value: "opportunity" },
+      anchor: { value: "neutral" },
+      fridge: { value: "green" },
+    },
+  });
+  await status.handle(makeMessage("status"), {}, deliver, app);
+  assert.equal(calls[0].content, "Systems: red housebank; amber bilge");
+});
+
+test("status reports all systems green when every tile is green", async () => {
+  const { deliver, calls } = makeDeliver();
+  const app = makeApp({
+    "statusTiles.tiles": {
+      housebank: { value: "green" },
+      bilge: { value: "green" },
+    },
+  });
+  await status.handle(makeMessage("status"), {}, deliver, app);
+  assert.equal(calls[0].content, "Systems: all green");
+});
+
+test("status stays quiet about systems on a boat without status tiles", async () => {
+  const { deliver, calls } = makeDeliver();
+  const app = makeApp({
+    "environment.depth.belowSurface": { value: 5.24 },
+  });
+  await status.handle(makeMessage("status"), {}, deliver, app);
+  assert.equal(calls[0].content, "Depth: 5.2 m below surface");
+});

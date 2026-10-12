@@ -16,6 +16,8 @@ const {
   formatTide,
   formatWind,
   formatBattery,
+  systemsStatus,
+  colorizeSystems,
   INDEX_PATH,
   NODE_ASPECT,
   UNKNOWN_VESSEL,
@@ -221,6 +223,89 @@ test("formatBattery converts SoC to percent and shows current", () => {
   assert.equal(formatBattery(undefined, undefined), "");
 });
 
+test("formatBattery appends the energy outlook to the line", () => {
+  assert.equal(
+    formatBattery(1, undefined, "surplus"),
+    "Battery: 100 %, surplus",
+  );
+  assert.equal(
+    formatBattery(0.873, 2.3, "deficit"),
+    "Battery: 87 %, 2.3 A, deficit",
+  );
+});
+
+test("formatBattery leaves the outlook out without charge or current", () => {
+  assert.equal(formatBattery(undefined, undefined, "surplus"), "");
+});
+
+test("systemsStatus renders all green when every tile is green", () => {
+  assert.equal(
+    systemsStatus({
+      housebank: { value: "green" },
+      bilge: "green",
+    }),
+    "Systems: all green",
+  );
+});
+
+test("systemsStatus names the red and amber tiles, ignoring opportunity and neutral", () => {
+  assert.equal(
+    systemsStatus({
+      housebank: { value: "red" },
+      bilge: { value: "amber" },
+      watermaker: { value: "opportunity" },
+      anchor: { value: "neutral" },
+      fridge: { value: "green" },
+    }),
+    "Systems: red housebank; amber bilge",
+  );
+});
+
+test("systemsStatus reports a lone red tile without the amber group", () => {
+  assert.equal(
+    systemsStatus({ housebank: { value: "red" } }),
+    "Systems: red housebank",
+  );
+});
+
+test("systemsStatus stays quiet when every tile is opportunity or neutral", () => {
+  assert.equal(
+    systemsStatus({
+      watermaker: { value: "opportunity" },
+      anchor: { value: "neutral" },
+    }),
+    "",
+  );
+});
+
+test("systemsStatus stays quiet on a boat without status tiles", () => {
+  assert.equal(systemsStatus(undefined), "");
+  assert.equal(systemsStatus({}), "");
+  assert.equal(systemsStatus("nonsense"), "");
+});
+
+test("colorizeSystems colors the all-green summary green", () => {
+  assert.equal(
+    colorizeSystems("Systems: all green"),
+    "Systems: `F0a0all green`f",
+  );
+});
+
+test("colorizeSystems colors each group in its state's color", () => {
+  assert.equal(
+    colorizeSystems("Systems: red housebank; amber bilge"),
+    "Systems: `F900red housebank`f; `Faa0amber bilge`f",
+  );
+});
+
+test("colorizeSystems leaves other lines untouched", () => {
+  assert.equal(colorizeSystems("Battery: 87 %"), "Battery: 87 %");
+  assert.equal(
+    colorizeSystems("Depth: 5.2 m below surface"),
+    "Depth: 5.2 m below surface",
+  );
+});
+
 // --- shared telemetry lines (page body & Status command reply) --------------
 
 test("telemetryLines renders one line per available reading, in page order", () => {
@@ -255,6 +340,43 @@ test("telemetryLines omits absent readings entirely", () => {
   ]);
   assert.deepEqual(telemetryLines({}), []);
   assert.deepEqual(telemetryLines(undefined), []);
+});
+
+test("telemetryLines appends the energy outlook to the battery line", () => {
+  assert.deepEqual(
+    telemetryLines({
+      batterySoc: { value: 0.873 },
+      energyOutlook: { value: "surplus" },
+    }),
+    ["Battery: 87 %, surplus"],
+  );
+});
+
+test("telemetryLines leaves the outlook out when no prediction has run yet", () => {
+  assert.deepEqual(
+    telemetryLines({
+      batterySoc: { value: 0.873 },
+      energyOutlook: null,
+    }),
+    ["Battery: 87 %"],
+  );
+});
+
+test("telemetryLines appends the status tile summary after the battery", () => {
+  assert.deepEqual(
+    telemetryLines({
+      batterySoc: { value: 0.873 },
+      tiles: { housebank: { value: "red" } },
+    }),
+    ["Battery: 87 %", "Systems: red housebank"],
+  );
+});
+
+test("telemetryLines reports systems from tiles alone", () => {
+  assert.deepEqual(
+    telemetryLines({ tiles: { housebank: "green", bilge: "green" } }),
+    ["Systems: all green"],
+  );
 });
 
 test("telemetryLines is exactly what the micron page renders as its body", () => {
@@ -292,6 +414,8 @@ test("telemetryContext reads the same self paths the page context used to", () =
     "environment.wind.directionTrue",
     "electrical.batteries.house.capacity.stateOfCharge",
     "electrical.batteries.house.current",
+    "electrical.energy.prediction.status",
+    "statusTiles.tiles",
   ]);
   assert.deepEqual(context.state, { value: "moored" });
   assert.equal(context.depth, undefined);
@@ -398,6 +522,39 @@ test("renderPage appends a Vessel status section when telemetry is available", (
       "Tide: 1.3 m, rising\n" +
       "Wind: 12 kn from 45\u00B0\n" +
       "Battery: 87 %, 2.3 A\n",
+  );
+});
+
+test("renderPage renders the outlook and systems summary on the page too", () => {
+  const page = renderPage({
+    vesselName: "S/Y Bergie",
+    telemetry: {
+      batterySoc: 1,
+      energyOutlook: "surplus",
+      tiles: { housebank: { value: "red" }, bilge: { value: "green" } },
+    },
+  });
+  assert.equal(
+    page,
+    ">>S/Y Bergie\n" +
+      "\n" +
+      ">Vessel status\n" +
+      "Battery: 100 %, surplus\n" +
+      "Systems: `F900red housebank`f\n",
+  );
+});
+
+test("renderPage leaves the plain battery line uncolored on the page", () => {
+  const page = renderPage({
+    vesselName: "S/Y Bergie",
+    telemetry: {
+      batterySoc: 1,
+      energyOutlook: "surplus",
+    },
+  });
+  assert.equal(
+    page,
+    ">>S/Y Bergie\n\n>Vessel status\nBattery: 100 %, surplus\n",
   );
 });
 
