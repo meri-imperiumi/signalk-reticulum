@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.7.0] - 2026-10-12
 ### Fixed
 - **Identity private keys now use the shorter Python-compatible format** (`@reticulum/core` 0.9.8 exports the 64-byte `[x25519 priv ‖ ed25519 priv]` blob instead of the old 128-byte private+public export). Configured private keys are canonicalized to the new 128-hex-character form on load, and freshly generated identities persist in it. Legacy 128-byte (256 hex character) private keys from earlier versions keep loading unchanged — the same identity is derived and the stored key is upgraded to the canonical format on the next save. This unbreaks plugin start, which refused every key stored by a 0.9.7-resolved install and aborted before connecting any interface
 ### Added
