@@ -189,7 +189,7 @@ test("briefingDataDir derives the sibling plugin dir from the config path", () =
   const app = { config: { configPath: "/data/.signalk" } };
   assert.equal(
     briefingDataDir(app),
-    "/data/.signalk/plugin-config-data/signalk-passage-briefing",
+    path.join("/data/.signalk", "plugin-config-data", BRIEFING_PLUGIN_ID),
   );
 });
 
@@ -199,7 +199,7 @@ test("briefingDataDir falls back to walking up from the plugin data dir", () => 
   };
   assert.equal(
     briefingDataDir(app),
-    "/data/.signalk/plugin-config-data/signalk-passage-briefing",
+    path.join("/data/.signalk", "plugin-config-data", BRIEFING_PLUGIN_ID),
   );
 });
 
