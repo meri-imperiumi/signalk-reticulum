@@ -330,6 +330,58 @@ test("makeDeliverer attaches the Markdown renderer field when asked", async () =
   Object.assign(deps, REAL_DEPS);
 });
 
+test("makeDeliverer attaches FIELD_REPLY_TO when replying to a message", async () => {
+  const router = new FakeLxmRouter({}, {});
+  const identity = { id: "me" };
+  deps.LXMessage = FakeLXMessage;
+  deps.FIELD_RENDERER = 0x0f;
+  deps.RENDERER_MARKDOWN = 0x02;
+  deps.FIELD_REPLY_TO = 0x30;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  const deliver = makeDeliverer(router, identity);
+  // Raw 32-byte message id (§5.9.9: bytes on the wire, NOT hex) — the shape
+  // Columba's MessageMapper parses back into a threaded reply.
+  const inboundId = new Uint8Array(32).fill(9);
+  await deliver("0123456789abcdef0123456789abcdef", "", "Reply", null, {
+    replyTo: inboundId,
+  });
+  // Composes with the Markdown renderer field on the same message.
+  await deliver("0123456789abcdef0123456789abcdef", "", "**Reply**", null, {
+    markdown: true,
+    replyTo: inboundId,
+  });
+  // Anything that is not a 32-byte Uint8Array is ignored — no half-canonical
+  // fields on the wire.
+  await deliver("0123456789abcdef0123456789abcdef", "", "No thread", null, {
+    replyTo: new Uint8Array(16).fill(9),
+  });
+  await deliver("0123456789abcdef0123456789abcdef", "", "No thread", null, {
+    replyTo: Buffer.from(new Uint8Array(32).fill(9)).toString("hex"),
+  });
+  await deliver("0123456789abcdef0123456789abcdef", "", "No thread");
+
+  assert.equal(router.sent.length, 5);
+  assert.deepEqual(
+    router.sent[0].message.options.fields,
+    new Map([[0x30, inboundId]]),
+    "reply-to alone attaches the raw 32-byte id under field 0x30",
+  );
+  assert.deepEqual(
+    router.sent[1].message.options.fields,
+    new Map([
+      [0x0f, 0x02],
+      [0x30, inboundId],
+    ]),
+    "markdown and reply-to share one fields map",
+  );
+  assert.equal(router.sent[2].message.options.fields, undefined);
+  assert.equal(router.sent[3].message.options.fields, undefined);
+  assert.equal(router.sent[4].message.options.fields, undefined);
+
+  Object.assign(deps, REAL_DEPS);
+});
+
 test("makeDeliverer escalates to opportunistic delivery when the link reply fails", async () => {
   const router = new FakeLxmRouter({}, {});
   const identity = { id: "me" };

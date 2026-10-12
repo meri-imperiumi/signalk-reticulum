@@ -22,6 +22,21 @@ const { commands, isFromCrew, availableExamples } = require("./registry");
 const fallback = require("./fallback");
 
 /**
+ * Validates a candidate reply-to message id: the raw 32-byte LXMF `messageId`
+ * (SHA-256 over the wire payload per §5.5) that `FIELD_REPLY_TO` (§5.9.9)
+ * carries. Synthetic messages (tests, fakes) often have no id — those simply
+ * get no threading.
+ *
+ * @param {unknown} messageId
+ * @returns {Uint8Array|null}
+ */
+function replyToId(messageId) {
+  return messageId instanceof Uint8Array && messageId.length === 32
+    ? messageId
+    : null;
+}
+
+/**
  * Dispatches an incoming LXMF message to the first matching command.
  *
  * Crew-only commands are skipped unless {@link isFromCrew} says the message
@@ -37,7 +52,13 @@ const fallback = require("./fallback");
  * arrival link (e.g. a synthetic dispatch); the command then replies
  * opportunistically.
  *
- * @param {{sourceHash:Uint8Array, content?:string}|null|undefined} message
+ * Every reply made through the callback is threaded: when the inbound message
+ * carries a 32-byte `messageId` it is attached to the reply's deliver opts as
+ * `replyTo`, which the deliverer turns into the LXMF `FIELD_REPLY_TO` field
+ * (§5.9.9) so clients such as Columba render the reply as "in reply to" the
+ * original message. A message without a usable id replies unthreaded.
+ *
+ * @param {{sourceHash:Uint8Array, content?:string, messageId?:Uint8Array|null}|null|undefined} message
  * @param {object|null|undefined} settings
  * @param {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, opts?:object)=>Promise<void>|undefined} deliver
  * @param {{debug?:(...args:any[])=>void, error?:(...args:any[])=>void}|null|undefined} [app]
@@ -49,6 +70,14 @@ async function handleMessage(message, settings, deliver, app, linkId) {
   if (!message || !deliver) {
     return;
   }
+  // Thread every reply made through this dispatch under the message being
+  // answered: the deliverer turns the id into FIELD_REPLY_TO (§5.9.9). An
+  // explicit `replyTo` in a command's own opts still wins.
+  const replyTo = replyToId(message.messageId);
+  const replyDeliver = replyTo
+    ? (dest, title, content, linkId2, opts = {}) =>
+        deliver(dest, title, content, linkId2, { replyTo, ...opts })
+    : deliver;
   const fromCrew = isFromCrew(message, settings);
   for (const name of Object.keys(commands)) {
     const command = commands[name];
@@ -62,7 +91,7 @@ async function handleMessage(message, settings, deliver, app, linkId) {
       continue;
     }
     try {
-      await command.handle(message, settings, deliver, app, linkId);
+      await command.handle(message, settings, replyDeliver, app, linkId);
       if (app && typeof app.debug === "function") {
         app.debug(`LXMF message handled by command "${name}"`);
       }
@@ -80,7 +109,7 @@ async function handleMessage(message, settings, deliver, app, linkId) {
   try {
     const answered = await fallback.handle(
       message,
-      deliver,
+      replyDeliver,
       availableExamples(settings, fromCrew),
     );
     if (answered && app && typeof app.debug === "function") {

@@ -63,8 +63,26 @@ function markdownize(line) {
   return boldHeading(boldLabel(line));
 }
 
+/**
+ * Joins rendered lines into a Markdown body with a **hard line break**
+ * (CommonMark: two trailing spaces before the newline) instead of a bare
+ * newline. A bare newline is a *soft* break, which Markdown renderers collapse
+ * into a space — Columba's renderer (multiplatform-markdown-renderer, default
+ * `eolAsNewLine: false`) and Sideband's both turn `a\nb` into `a b`, which
+ * jumbled every label-value line of a Status reply onto one line. A hard break
+ * renders as a real line break in every CommonMark client, and stays invisible
+ * in the plain-text fallback (trailing spaces don't show).
+ *
+ * @param {string[]} lines
+ * @returns {string}
+ */
+function markdownJoin(lines) {
+  return lines.join("  \n");
+}
+
 module.exports = {
   boldLabel,
   boldHeading,
   markdownize,
+  markdownJoin,
 };

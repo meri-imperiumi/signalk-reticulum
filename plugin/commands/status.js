@@ -11,8 +11,11 @@
  * whole report goes out as a single message — no radio-packet splitting.
  *
  * The reply carries the LXMF `FIELD_RENDERER` Markdown field (§5.9.4) with
- * the reading labels bolded — the wording stays identical to the NomadNet
- * page's lines, so the two views cannot drift apart.
+ * the reading labels bolded, and the lines are joined with Markdown hard
+ * line breaks (see {@link module:plugin/markdown}) — a bare newline is a soft
+ * break that Markdown renderers collapse into a space, which jumbled the
+ * whole report onto one line in Columba. The wording stays identical to the
+ * NomadNet page's lines, so the two views cannot drift apart.
  *
  * Available to everyone (not crew-only), mirroring the `signalk-meshtastic`
  * status command.
@@ -22,7 +25,7 @@
 
 const { toHex } = require("@reticulum/core");
 const { telemetryContext, telemetryLines } = require("../nomadnet");
-const { markdownize } = require("../markdown");
+const { markdownize, markdownJoin } = require("../markdown");
 
 /** Reply shown when the server reports none of the known readings. */
 const EMPTY_REPLY = "No telemetry available";
@@ -44,7 +47,7 @@ module.exports = {
     return deliver(
       toHex(message.sourceHash),
       "",
-      lines.length ? lines.map(markdownize).join("\n") : EMPTY_REPLY,
+      lines.length ? markdownJoin(lines.map(markdownize)) : EMPTY_REPLY,
       linkId,
       { markdown: true },
     );

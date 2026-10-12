@@ -16,11 +16,11 @@ function makeMessage(content, sourceHash = SOURCE) {
 }
 
 /** A recording deliver callback:
- * `deliver(destHash, title, content, linkId?)`. */
+ * `deliver(destHash, title, content, linkId?, opts?)`. */
 function makeDeliver() {
   const calls = [];
-  const deliver = async (destHash, title, content, linkId) => {
-    calls.push({ destHash, title, content, linkId });
+  const deliver = async (destHash, title, content, linkId, opts) => {
+    calls.push({ destHash, title, content, linkId, opts });
   };
   return { deliver, calls };
 }
@@ -133,6 +133,53 @@ test("handleMessage forwards the arrival link id to the command's reply", async 
     linkId,
     "arrival link threaded through to the reply",
   );
+});
+
+test("handleMessage threads the inbound message id into the reply as replyTo", async () => {
+  const { deliver, calls } = makeDeliver();
+  // What a real deserialized LXMessage carries: the raw 32-byte message id
+  // (SHA-256 over the wire payload) — FIELD_REPLY_TO material, §5.9.9.
+  const messageId = new Uint8Array(32).fill(4);
+
+  await handleMessage({ ...makeMessage("ping"), messageId }, {}, deliver, {});
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].opts.replyTo, messageId);
+});
+
+test("handleMessage threads the message id through to the fallback reply too", async () => {
+  fallback.reset();
+  const { deliver, calls } = makeDeliver();
+  const messageId = new Uint8Array(32).fill(4);
+
+  await handleMessage(
+    { ...makeMessage("unknown"), messageId },
+    {},
+    deliver,
+    {},
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].opts.replyTo, messageId);
+  fallback.reset();
+});
+
+test("handleMessage replies unthreaded when the message has no usable id", async () => {
+  const { deliver, calls } = makeDeliver();
+
+  // Synthetic messages (no messageId at all) and wrong-shaped ids both
+  // produce a reply without a replyTo opt.
+  await handleMessage(makeMessage("ping"), {}, deliver, {});
+  await handleMessage(
+    { ...makeMessage("ping"), messageId: new Uint8Array(16).fill(4) },
+    {},
+    deliver,
+    {},
+  );
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].opts, undefined);
+  assert.equal(calls[1].opts, undefined);
 });
 
 test("handleMessage answers unmatched messages with the rate-limited fallback", async () => {

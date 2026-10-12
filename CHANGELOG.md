@@ -1,5 +1,9 @@
 # Changelog
 ## [Unreleased]
+### Fixed
+- **Markdown LXMF replies keep their line breaks.** The `Status` and `Briefing` replies are joined with Markdown hard line breaks (two trailing spaces before the newline, CommonMark) instead of bare newlines: a bare newline is a *soft* break, which Markdown renderers collapse into a space — Columba's renderer (multiplatform-markdown-renderer, default `eolAsNewLine: false`) and Sideband's both rendered the whole multi-line report jumbled onto one line. Hard breaks render as real line breaks in every CommonMark client and stay invisible in the plain-text fallback (trailing spaces don't show); the wording is unchanged and still identical to the NomadNet pages' lines. `Help`'s bullet list needed no change — list items are structural, not soft-wrapped paragraphs
+### Added
+- **Command replies thread under the message they answer (LXMF `FIELD_REPLY_TO`, §5.9.9).** Every reply made through the command dispatcher now carries the raw 32-byte `messageId` of the inbound message as the `FIELD_REPLY_TO` field (`0x30`), so Columba renders the `Ping`, `Status`, `Briefing`, `Help`, `Log`, switching and fallback replies as "in reply to" the original conversation bubble. Threading is attached centrally in the dispatcher (`handleMessage` wraps the deliver callback) and emitted by the shared deliverer (`opts.replyTo`, raw 32-byte `Uint8Array` only — anything else is ignored so the wire shape stays canonical, bytes not hex); messages without a usable id (synthetic dispatches) reply unthreaded. No quote field (`0x31`) is sent
 
 ## [0.7.0] - 2026-10-12
 ### Fixed

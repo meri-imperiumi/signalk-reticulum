@@ -34,6 +34,7 @@ const deps = {
   FIELD_ICON_APPEARANCE: LXMFConstants.FIELD_ICON_APPEARANCE,
   FIELD_RENDERER: LXMFConstants.FIELD_RENDERER,
   RENDERER_MARKDOWN: LXMFConstants.RENDERER_MARKDOWN,
+  FIELD_REPLY_TO: LXMFConstants.FIELD_REPLY_TO,
   fromHex: RNS.fromHex,
   toHex: RNS.toHex,
 };
@@ -301,11 +302,16 @@ async function setupMessaging(rns, identity, options = {}, log = () => {}) {
  * @param {object|((msg:string)=>void)} [options] - Outbound sender options
  *   (`debug`, `getEmbeddedNode`, `timeoutMs`) or, for convenience, a bare
  *   debug logger.
- * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, opts?:{markdown?:boolean})=>Promise<object>}
+ * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, opts?:{markdown?:boolean, replyTo?:Uint8Array|null})=>Promise<object>}
  *   Resolves with the LXMessage that was sent. The `opts.markdown` flag
  *   attaches the LXMF `FIELD_RENDERER` field (`RENDERER_MARKDOWN`, §5.9.4) so
  *   clients such as Sideband render the content as Markdown; without it (or
- *   the flag) the message carries no fields and reads as plain text.
+ *   the flag) the message carries no fields and reads as plain text. The
+ *   `opts.replyTo` value — the *raw 32-byte* `messageId` of the inbound LXMF
+ *   message being replied to — attaches the LXMF `FIELD_REPLY_TO` field
+ *   (§5.9.9) so Columba threads the reply under the original conversation
+ *   bubble; anything that is not a 32-byte `Uint8Array` is ignored, keeping
+ *   the wire shape canonical (raw bytes, not hex).
  */
 function makeDeliverer(lxmf, identity, options = {}) {
   const senderOptions = resolveSenderOptions(options);
@@ -324,8 +330,15 @@ function makeDeliverer(lxmf, identity, options = {}) {
       title,
       content,
     };
+    const fields = [];
     if (opts.markdown) {
-      options.fields = new Map([[deps.FIELD_RENDERER, deps.RENDERER_MARKDOWN]]);
+      fields.push([deps.FIELD_RENDERER, deps.RENDERER_MARKDOWN]);
+    }
+    if (opts.replyTo instanceof Uint8Array && opts.replyTo.length === 32) {
+      fields.push([deps.FIELD_REPLY_TO, opts.replyTo]);
+    }
+    if (fields.length) {
+      options.fields = new Map(fields);
     }
     const message = new deps.LXMessage(options);
     await sender(message, { linkId });

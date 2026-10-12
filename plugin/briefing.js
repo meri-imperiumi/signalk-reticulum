@@ -28,7 +28,7 @@
 const { access, readdir, readFile } = require("node:fs/promises");
 const path = require("node:path");
 
-const { markdownize } = require("./markdown");
+const { markdownize, markdownJoin } = require("./markdown");
 
 /** The sibling plugin whose cached briefing payload we render. */
 const BRIEFING_PLUGIN_ID = "signalk-passage-briefing";
@@ -729,7 +729,7 @@ function briefingMarkdown(params = {}) {
   if (!lines.length) {
     return "**Passage briefing**\n\nNo briefing available";
   }
-  return `**Passage briefing**\n\n${lines.map(markdownize).join("\n")}`;
+  return `**Passage briefing**\n\n${markdownJoin(lines.map(markdownize))}`;
 }
 
 module.exports = {

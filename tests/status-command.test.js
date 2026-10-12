@@ -12,11 +12,11 @@ function makeMessage(content, sourceHash = SOURCE) {
   return { content, sourceHash };
 }
 
-/** A recording deliver callback: `deliver(destHash, title, content, linkId?)`. */
+/** A recording deliver callback: `deliver(destHash, title, content, linkId?, opts?)`. */
 function makeDeliver() {
   const calls = [];
-  const deliver = async (destHash, title, content, linkId) => {
-    calls.push({ destHash, title, content, linkId });
+  const deliver = async (destHash, title, content, linkId, opts) => {
+    calls.push({ destHash, title, content, linkId, opts });
   };
   return { deliver, calls };
 }
@@ -68,6 +68,9 @@ test("status replies with the same lines the NomadNet page renders", async () =>
   assert.equal(calls.length, 1, "one reply message");
   // The vessel name is not repeated: the sender already sees it as the
   // destination's announced display name
+  // Lines are joined with Markdown HARD line breaks (two trailing spaces): a
+  // bare newline is a soft break that Markdown renderers (Columba, Sideband)
+  // collapse into a space, jumbling the whole report onto one line
   assert.equal(
     calls[0].content,
     [
@@ -76,9 +79,10 @@ test("status replies with the same lines the NomadNet page renders", async () =>
       "**Depth:** 5.2 m below surface",
       "**Wind:** 12 kn from 45\u00B0",
       "**Battery:** 87 %, 2.3 A",
-    ].join("\n"),
+    ].join("  \n"),
   );
   assert.equal(calls[0].title, "");
+  assert.deepEqual(calls[0].opts, { markdown: true });
 });
 
 test("status sends the whole report as a single message", async () => {
