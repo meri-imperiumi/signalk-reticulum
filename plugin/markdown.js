@@ -64,20 +64,27 @@ function markdownize(line) {
 }
 
 /**
- * Joins rendered lines into a Markdown body with a **hard line break**
- * (CommonMark: two trailing spaces before the newline) instead of a bare
- * newline. A bare newline is a *soft* break, which Markdown renderers collapse
- * into a space — Columba's renderer (multiplatform-markdown-renderer, default
- * `eolAsNewLine: false`) and Sideband's both turn `a\nb` into `a b`, which
- * jumbled every label-value line of a Status reply onto one line. A hard break
- * renders as a real line break in every CommonMark client, and stays invisible
- * in the plain-text fallback (trailing spaces don't show).
+ * Joins rendered lines into a Markdown **bullet list** — each line becomes a
+ * `- ` list item, items separated by a bare newline.
+ *
+ * Why a list: a bare newline between paragraphs is a *soft* break, which
+ * Markdown renderers collapse into a space — Columba's renderer
+ * (multiplatform-markdown-renderer, default `eolAsNewLine: false`) and
+ * Sideband's both turn `a\nb` into `a b`, which jumbled every label-value
+ * line of a Status reply onto one line. List items are block-level
+ * structure, so every CommonMark client renders them as separate rows —
+ * no trailing-whitespace tricks involved (the CommonMark two-space hard
+ * break proved unreliable in the field), and the tight form stays compact
+ * where blank-line paragraph separation would double the reply's height.
+ * This is also exactly the shape the `Help` reply already uses, which renders
+ * correctly in Columba. In the plain-text fallback the `- ` prefixes read as
+ * plain bullets.
  *
  * @param {string[]} lines
  * @returns {string}
  */
 function markdownJoin(lines) {
-  return lines.join("  \n");
+  return lines.map((line) => `- ${line}`).join("\n");
 }
 
 module.exports = {

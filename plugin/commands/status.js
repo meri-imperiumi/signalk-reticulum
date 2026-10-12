@@ -11,11 +11,12 @@
  * whole report goes out as a single message — no radio-packet splitting.
  *
  * The reply carries the LXMF `FIELD_RENDERER` Markdown field (§5.9.4) with
- * the reading labels bolded, and the lines are joined with Markdown hard
- * line breaks (see {@link module:plugin/markdown}) — a bare newline is a soft
- * break that Markdown renderers collapse into a space, which jumbled the
- * whole report onto one line in Columba. The wording stays identical to the
- * NomadNet page's lines, so the two views cannot drift apart.
+ * the reading labels bolded, and the lines render as a tight Markdown bullet
+ * list (see {@link module:plugin/markdown}) — a bare newline between
+ * paragraphs is a soft break that Markdown renderers collapse into a space,
+ * which jumbled the whole report onto one line in Columba. The wording stays
+ * identical to the NomadNet page's lines, so the two views cannot drift
+ * apart.
  *
  * Available to everyone (not crew-only), mirroring the `signalk-meshtastic`
  * status command.

@@ -569,6 +569,9 @@ test("renderPage omits individual readings that are not available", () => {
 test("renderPage renders crew page links as Micron links in a Crew section", () => {
   const page = renderPage({
     vesselName: "Boat",
+    // `<hash>:/page/x.mu` — the target form the Micron reference documents;
+    // every client navigates it, unlike a bare same-node path
+    selfHash: "ab".repeat(16),
     crewPages: [
       { path: "/page/briefing.mu", label: "Passage briefing" },
       { path: "/page/watch.mu", label: "Watch plan" },
@@ -578,8 +581,18 @@ test("renderPage renders crew page links as Micron links in a Crew section", () 
   // [label](target), which Micron renders as literal text
   assert.equal(
     page,
-    ">>Boat\n\n>Crew\n[Passage briefing`/page/briefing.mu]\n[Watch plan`/page/watch.mu]\n",
+    ">>Boat\n\n>Crew\n" +
+      `[Passage briefing\`${"ab".repeat(16)}:/page/briefing.mu]\n` +
+      `[Watch plan\`${"ab".repeat(16)}:/page/watch.mu]\n`,
   );
+});
+
+test("renderPage falls back to bare-path crew link targets without a self hash", () => {
+  const page = renderPage({
+    vesselName: "Boat",
+    crewPages: [{ path: "/page/briefing.mu", label: "Passage briefing" }],
+  });
+  assert.equal(page, ">>Boat\n\n>Crew\n[Passage briefing`/page/briefing.mu]\n");
 });
 
 test("renderPage omits the Crew section entirely when it is empty, absent or has no valid links", () => {

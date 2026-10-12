@@ -476,6 +476,12 @@ function telemetryContext(app) {
  *   page links, rendered as a "Crew" section of micron links. Only supplied
  *   for identified crew: anonymous or non-crew viewers get no section at all
  *   and never learn the pages exist.
+ * @param {unknown} [context.selfHash] - Hex destination hash of this NomadNet
+ *   node. When set, crew link targets are prefixed with it
+ *   (`<hash>:/page/x.mu`, the cross-node form the Micron reference documents)
+ *   — every target in the reference carries the hash, and clients only
+ *   reliably navigate those; without it the bare same-node `/page/x.mu` form
+ *   is emitted.
  * @param {object} [context.telemetry] - Raw Signal K self-path values. The
  *   `position` key takes the `navigation.position` object
  *   (`{latitude, longitude}`, optionally `{value}` wrapped).
@@ -512,11 +518,16 @@ function renderPage(context = {}) {
   if (crewPages.length) {
     lines.push("");
     lines.push(">Crew");
+    // Micron link syntax: [label`target], backtick-separated (NOT Markdown's
+    // [label](target) — Micron has no parentheses form, so that rendered as
+    // literal text and the link did nothing when tapped). The target carries
+    // this node's destination hash when known — `<hash>:/page/x.mu` is the
+    // form the Micron reference documents and the only one every client
+    // navigates correctly.
+    const selfHash = readString(cfg.selfHash);
+    const prefix = selfHash ? `${selfHash}:` : "";
     for (const page of crewPages) {
-      // Micron link syntax: [label`target], backtick-separated (NOT Markdown's
-      // [label](target) — Micron has no parentheses form, so that rendered as
-      // literal text and the link did nothing when tapped).
-      lines.push(`[${page.label}\`${page.path}]`);
+      lines.push(`[${page.label}\`${prefix}${page.path}]`);
     }
   }
 
@@ -661,8 +672,13 @@ async function setupNomadNet(rns, identity, options = {}, log = () => {}) {
   await dest.registerRequestHandler(INDEX_PATH, {
     responseGenerator: makeResponseGenerator((_path, _data, remoteIdentity) =>
       // The requester's identity decides which links the page shows: crew
-      // pages are linked only to identified crew
-      renderPage(getContext(remoteIdentity)),
+      // pages are linked only to identified crew. The node's own destination
+      // hash goes into the context so crew link targets carry the
+      // `<hash>:<path>` form clients navigate correctly.
+      renderPage({
+        ...getContext(remoteIdentity),
+        selfHash: deps.toHex(dest.destinationHash),
+      }),
     ),
     allow: deps.Allow.ALL,
   });

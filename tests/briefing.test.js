@@ -378,31 +378,31 @@ test("micronizeLine turns section labels into headers and colors hazards", () =>
 test("briefingMarkdown renders the Markdown LXMF reply", () => {
   assert.equal(
     briefingMarkdown({ payload: makePayload(), meta: {}, now: NOW }),
-    // Heading, then the body lines joined with Markdown HARD line breaks
-    // (two trailing spaces): a bare newline is a soft break that Markdown
-    // renderers (Columba, Sideband) collapse into a space, jumbling every
-    // line onto one
+    // Heading, then the body lines as a tight Markdown bullet list: list
+    // items are block-level structure, so every renderer (Columba, Sideband)
+    // shows them as separate rows — a bare newline between paragraphs would
+    // collapse into a space, jumbling every line onto one
     "**Passage briefing**\n\n" +
       [
-        "Compiled 10-12 08:00Z, 30m old",
-        "Conditions here, next 24h",
-        "**Comfort:** easy",
-        "**Wind:** 12-18 kn from WSW, gusts to 24 kn",
-        "**Waves:** max 1.4 m at 7 s",
-        "**Pressure:** 1005 hPa, falling",
-        "**Cloud cover:** up to 90 %",
-        "**Warnings**",
-        "GALE WARNING. Winds 30 to 40 kn.",
-        "⚠ **Hazards**",
-        "**red Earthquake:** M 6.2 nearby (120 nm NE)",
-        "🔋 **Energy**",
-        "Surplus 2.1 kWh until 10-12 14:00Z",
-        "☾ **Tonight**",
-        "☀ **Sun:** 10-12 19:04Z↓, 10-13 05:31Z↑",
-        "☽ **Moon:** 10-12 22:31Z↑, 10-13 06:12Z↓, 40% lit",
-        "✦ **Sky**",
-        "10-12 19:30Z Venus and Jupiter in conjunction: 0.5° apart",
-      ].join("  \n"),
+        "- Compiled 10-12 08:00Z, 30m old",
+        "- Conditions here, next 24h",
+        "- **Comfort:** easy",
+        "- **Wind:** 12-18 kn from WSW, gusts to 24 kn",
+        "- **Waves:** max 1.4 m at 7 s",
+        "- **Pressure:** 1005 hPa, falling",
+        "- **Cloud cover:** up to 90 %",
+        "- **Warnings**",
+        "- GALE WARNING. Winds 30 to 40 kn.",
+        "- ⚠ **Hazards**",
+        "- **red Earthquake:** M 6.2 nearby (120 nm NE)",
+        "- 🔋 **Energy**",
+        "- Surplus 2.1 kWh until 10-12 14:00Z",
+        "- ☾ **Tonight**",
+        "- ☀ **Sun:** 10-12 19:04Z↓, 10-13 05:31Z↑",
+        "- ☽ **Moon:** 10-12 22:31Z↑, 10-13 06:12Z↓, 40% lit",
+        "- ✦ **Sky**",
+        "- 10-12 19:30Z Venus and Jupiter in conjunction: 0.5° apart",
+      ].join("\n"),
   );
 });
 
@@ -471,7 +471,9 @@ test("the briefing command replies with the cached briefing", () =>
       "link-1",
     );
     assert.equal(calls.length, 1);
-    assert.ok(calls[0].content.startsWith("**Passage briefing**\n\nCompiled "));
+    assert.ok(
+      calls[0].content.startsWith("**Passage briefing**\n\n- Compiled "),
+    );
     assert.equal(calls[0].title, "");
     assert.equal(calls[0].linkId, "link-1");
   }));

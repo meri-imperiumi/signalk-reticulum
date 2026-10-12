@@ -68,18 +68,19 @@ test("status replies with the same lines the NomadNet page renders", async () =>
   assert.equal(calls.length, 1, "one reply message");
   // The vessel name is not repeated: the sender already sees it as the
   // destination's announced display name
-  // Lines are joined with Markdown HARD line breaks (two trailing spaces): a
-  // bare newline is a soft break that Markdown renderers (Columba, Sideband)
-  // collapse into a space, jumbling the whole report onto one line
+  // Lines render as a tight Markdown bullet list: list items are block-level
+  // structure, so every renderer (Columba, Sideband) shows them as separate
+  // rows — a bare newline between paragraphs would collapse into a space,
+  // jumbling the whole report onto one line
   assert.equal(
     calls[0].content,
     [
-      "Vessel is anchored",
-      "**Position:** 60\u00B007.404' N, 021\u00B034.068' E",
-      "**Depth:** 5.2 m below surface",
-      "**Wind:** 12 kn from 45\u00B0",
-      "**Battery:** 87 %, 2.3 A",
-    ].join("  \n"),
+      "- Vessel is anchored",
+      "- **Position:** 60\u00B007.404' N, 021\u00B034.068' E",
+      "- **Depth:** 5.2 m below surface",
+      "- **Wind:** 12 kn from 45\u00B0",
+      "- **Battery:** 87 %, 2.3 A",
+    ].join("\n"),
   );
   assert.equal(calls[0].title, "");
   assert.deepEqual(calls[0].opts, { markdown: true });
@@ -113,7 +114,7 @@ test("status omits readings the server does not report", async () => {
     "environment.depth.belowSurface": { value: 5.24 },
   });
   await status.handle(makeMessage("status"), {}, deliver, app);
-  assert.equal(calls[0].content, "**Depth:** 5.2 m below surface");
+  assert.equal(calls[0].content, "- **Depth:** 5.2 m below surface");
 });
 
 test("status tells the sender when no readings are available", async () => {
@@ -143,7 +144,7 @@ test("status appends the energy predictor outlook to the battery line", async ()
     "electrical.energy.prediction.status": { value: "surplus" },
   });
   await status.handle(makeMessage("status"), {}, deliver, app);
-  assert.equal(calls[0].content, "**Battery:** 87 %, surplus");
+  assert.equal(calls[0].content, "- **Battery:** 87 %, surplus");
 });
 
 test("status reports the plain battery line without the energy predictor", async () => {
@@ -152,7 +153,7 @@ test("status reports the plain battery line without the energy predictor", async
     "electrical.batteries.house.capacity.stateOfCharge": { value: 0.873 },
   });
   await status.handle(makeMessage("status"), {}, deliver, app);
-  assert.equal(calls[0].content, "**Battery:** 87 %");
+  assert.equal(calls[0].content, "- **Battery:** 87 %");
 });
 
 test("status summarizes the status tiles when the plugin publishes them", async () => {
@@ -169,7 +170,7 @@ test("status summarizes the status tiles when the plugin publishes them", async 
     },
   });
   await status.handle(makeMessage("status"), {}, deliver, app);
-  assert.equal(calls[0].content, "**Systems:** red housebank; amber bilge");
+  assert.equal(calls[0].content, "- **Systems:** red housebank; amber bilge");
 });
 
 test("status reports all systems green when every tile is green", async () => {
@@ -181,7 +182,7 @@ test("status reports all systems green when every tile is green", async () => {
     },
   });
   await status.handle(makeMessage("status"), {}, deliver, app);
-  assert.equal(calls[0].content, "**Systems:** all green");
+  assert.equal(calls[0].content, "- **Systems:** all green");
 });
 
 test("status stays quiet about systems on a boat without status tiles", async () => {
@@ -190,5 +191,5 @@ test("status stays quiet about systems on a boat without status tiles", async ()
     "environment.depth.belowSurface": { value: 5.24 },
   });
   await status.handle(makeMessage("status"), {}, deliver, app);
-  assert.equal(calls[0].content, "**Depth:** 5.2 m below surface");
+  assert.equal(calls[0].content, "- **Depth:** 5.2 m below surface");
 });

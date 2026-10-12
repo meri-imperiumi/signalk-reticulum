@@ -1,5 +1,8 @@
 # Changelog
 ## [Unreleased]
+### Fixed
+- **`Status` and `Briefing` replies render as a tight Markdown bullet list.** 0.7.1 separated the reply lines with CommonMark hard line breaks (two trailing spaces), which are spec-correct and handled by Columba's parser stack but proved unreliable in the field — trailing whitespace is exactly what text pipelines strip, and Columba still rendered the whole report jumbled onto one line. Each line is now a `- ` list item separated by a bare newline: list items are block-level structure no renderer can collapse (the shape the `Help` reply already uses, which renders correctly in Columba), the tight form stays compact, and the plain-text fallback reads the `- ` prefixes as plain bullets. The wording is unchanged and still identical to the NomadNet pages' lines
+- **The NomadNet Crew-section link targets carry the node's destination hash.** 0.7.1 switched the crew links to Micron's backtick form but left bare same-node paths (`[Passage briefing\`/page/briefing.mu]`), which NomadNet's own `Browser.parse_url` rejects as `Malformed URL` — only hash-prefixed targets (`<64hex>:/page/x.mu`), the form the Micron reference documents, parse and navigate. The index now prefixes each crew link target with the node's own destination hash
 
 ## [0.7.1] - 2026-10-12
 ### Fixed

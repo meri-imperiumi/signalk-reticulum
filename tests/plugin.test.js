@@ -2438,10 +2438,11 @@ test("start serves the briefing page to identified crew and links it from the in
       0,
     );
     assert.match(Buffer.from(crewPage).toString("utf8"), />Crew/);
-    // Micron link syntax [label`target] — the link must actually navigate
+    // Micron link syntax [label`target] with this node's destination hash —
+    // the form the Micron reference documents and clients actually navigate
     assert.match(
       Buffer.from(crewPage).toString("utf8"),
-      /\[Passage briefing`\/page\/briefing\.mu\]/,
+      /\[Passage briefing`(?:0d){16}:\/page\/briefing\.mu\]/,
     );
     const briefing = await dest.registered[1].options.responseGenerator(
       "/page/briefing.mu",
