@@ -186,20 +186,20 @@ test("isStale uses the bus stale flag when present", () => {
 // --- data dir & cache loading ----------------------------------------------
 
 test("briefingDataDir derives the sibling plugin dir from the config path", () => {
-  const app = { config: { configPath: "/home/user/.signalk" } };
+  const app = { config: { configPath: "/data/.signalk" } };
   assert.equal(
     briefingDataDir(app),
-    "/home/user/.signalk/plugin-config-data/signalk-passage-briefing",
+    "/data/.signalk/plugin-config-data/signalk-passage-briefing",
   );
 });
 
 test("briefingDataDir falls back to walking up from the plugin data dir", () => {
   const app = {
-    getDataDirPath: () => "/home/user/.signalk/plugin-config-data/other-plugin",
+    getDataDirPath: () => "/data/.signalk/plugin-config-data/other-plugin",
   };
   assert.equal(
     briefingDataDir(app),
-    "/home/user/.signalk/plugin-config-data/signalk-passage-briefing",
+    "/data/.signalk/plugin-config-data/signalk-passage-briefing",
   );
 });
 

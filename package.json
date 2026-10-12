@@ -3,6 +3,9 @@
   "version": "0.6.9",
   "description": "Signal K integration with the Reticulum mesh network",
   "main": "plugin/index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "lint": "npx @biomejs/biome check --use-editorconfig=true plugin/",
     "format": "npx @biomejs/biome check --use-editorconfig=true --write plugin/ tests/",
