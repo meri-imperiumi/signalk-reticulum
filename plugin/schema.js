@@ -225,9 +225,10 @@ function buildPluginSchema(interfaces) {
             type: "string",
             title: "Private key",
             description:
-              "Private key for this identity (128 bytes, hexadecimal). " +
+              "Private key for this identity (64 bytes, hexadecimal). " +
               "Leave empty to auto-generate a new identity on first start. " +
-              "Paste your own to reuse an existing Reticulum identity.",
+              "Paste your own to reuse an existing Reticulum identity. " +
+              "Legacy 128-byte private+public exports are also accepted.",
           },
         },
         additionalProperties: false,

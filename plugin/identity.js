@@ -12,8 +12,17 @@
 const crypto = require("crypto");
 const { Identity, toHex, fromHex } = require("@reticulum/core");
 
-/** Raw private key export length, in bytes (x25519 priv/pub + ed25519 priv/pub). */
-const PRIVATE_KEY_BYTES = 128;
+/**
+ * Raw private key length, in bytes, in the Python-compatible export format
+ * (`[x25519 priv(32) || ed25519 priv(32)]`) used by `@reticulum/core` 0.9.8+.
+ */
+const PRIVATE_KEY_BYTES = 64;
+/**
+ * Legacy private key export length, in bytes: the old full
+ * `[x25519 priv/pub || ed25519 priv/pub]` blob. Still accepted on load so
+ * operators with an older configured key keep their identity.
+ */
+const PRIVATE_KEY_LEGACY_BYTES = 128;
 /** Raw public key length, in bytes (x25519 pub + ed25519 pub). */
 const PUBLIC_KEY_BYTES = 64;
 /** Truncated identity/destination hash length, in bytes (SHA-256[:16]). */
@@ -24,7 +33,8 @@ const HEX_RE = /^[0-9a-f]+$/i;
 /**
  * @typedef {Object} IdentityConfig
  * @property {string} [publicKey] - Hex-encoded public key (64 bytes).
- * @property {string} [privateKey] - Hex-encoded private key (128 bytes).
+ * @property {string} [privateKey] - Hex-encoded private key (64 bytes, or a
+ *   legacy 128-byte private+public export).
  */
 
 /**
@@ -93,11 +103,20 @@ async function resolveIdentity(identityConfig) {
   const privateKeyInput = normalizeHex(cfg.privateKey);
 
   if (privateKeyInput) {
-    const privBytes = parseHexKey(
-      cfg.privateKey,
-      PRIVATE_KEY_BYTES,
-      "Private key",
-    );
+    if (!HEX_RE.test(privateKeyInput)) {
+      throw new Error("Private key is not valid hexadecimal");
+    }
+    const isCanonical = privateKeyInput.length === PRIVATE_KEY_BYTES * 2;
+    const isLegacy = privateKeyInput.length === PRIVATE_KEY_LEGACY_BYTES * 2;
+    if (!isCanonical && !isLegacy) {
+      throw new Error(
+        `Private key must be ${PRIVATE_KEY_BYTES * 2} hex characters ` +
+          `(${PRIVATE_KEY_BYTES} bytes), got ${privateKeyInput.length}`,
+      );
+    }
+    // `Identity.fromBytes` accepts both the 64-byte Python-compatible export
+    // and the legacy 128-byte private+public blob.
+    const privBytes = fromHex(privateKeyInput);
     const identity = await Identity.fromBytes(privBytes);
     if (!identity) {
       throw new Error("Could not load identity from the provided private key");

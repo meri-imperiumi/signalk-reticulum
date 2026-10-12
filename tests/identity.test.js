@@ -21,7 +21,8 @@ test("resolveIdentity generates a new identity when no private key is configured
 
   assert.equal(resolved.changed, true);
   assert.ok(resolved.identity instanceof Identity);
-  // Public key is 64 bytes (128 hex chars); private key 128 bytes (256 hex chars).
+  // Public key is 64 bytes (128 hex chars); private key 64 bytes (128 hex
+  // chars, Python-compatible format).
   assert.equal(resolved.publicKeyHex.length, PUBLIC_KEY_BYTES * 2);
   assert.equal(resolved.privateKeyHex.length, PRIVATE_KEY_BYTES * 2);
   // identityHash is the 16-byte truncated hash (32 hex chars).
@@ -82,10 +83,37 @@ test("resolveIdentity tolerates whitespace and dashes in the configured private 
   assert.equal(resolved.privateKeyHex, privateKeyHex);
 });
 
+test("resolveIdentity loads a legacy 128-byte private key export", async () => {
+  const source = await Identity.generate();
+  const privHex = toHex(await source.getPrivateKey());
+  const pubHex = toHex(await source.getPublicKey());
+  // Emulate a key stored with @reticulum/core 0.9.7: the 128-byte
+  // [x25519Priv || x25519Pub || ed25519Priv || ed25519Pub] export rather
+  // than the current 64-byte [x25519Priv || ed25519Priv] format.
+  const legacyHex =
+    privHex.slice(0, 64) +
+    pubHex.slice(0, 64) +
+    privHex.slice(64) +
+    pubHex.slice(64);
+  assert.equal(legacyHex.length, 256, "precondition: legacy export length");
+
+  const resolved = await resolveIdentity({ privateKey: legacyHex });
+
+  // The legacy blob loads the same identity and is re-exported in the
+  // canonical 64-byte format, flagged for persistence.
+  assert.equal(resolved.changed, true);
+  assert.equal(
+    toHex(resolved.identity.identityHash),
+    toHex(source.identityHash),
+  );
+  assert.equal(resolved.privateKeyHex.length, PRIVATE_KEY_BYTES * 2);
+  assert.equal(resolved.privateKeyHex, privHex);
+});
+
 test("resolveIdentity rejects a private key of the wrong length", async () => {
   await assert.rejects(
     () => resolveIdentity({ privateKey: "abcd" }),
-    /Private key must be 256 hex characters/,
+    /Private key must be 128 hex characters/,
   );
 });
 
