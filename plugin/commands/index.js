@@ -6,45 +6,20 @@
  *   - `crewOnly`  (boolean) — only run for messages from configured crew,
  *   - `example`   (string)  — a human-readable example of the trigger,
  *   - `accept(message, settings)`  — whether this command handles the message,
- *   - `handle(message, settings, deliver, app)` — performs the action.
+ *   - `handle(message, settings, deliver, app, linkId)` — performs the action.
  *
  * {@link handleMessage} dispatches an incoming LXMF message to the first
  * command whose `accept` returns true (first match wins), replying through the
- * caller-supplied `deliver` callback bound to the LXMF router.
+ * caller-supplied `deliver` callback bound to the LXMF router. A message no
+ * command accepts gets the rate-limited fallback reply (commands/fallback.js)
+ * listing what the sender may use, so strangers and typo-ing crew are never
+ * left waiting for a human that isn't there.
  *
  * @file commands/index.js
  */
 
-const { toHex } = require("@reticulum/core");
-const { effectiveCrew } = require("../notifications");
-
-/** Registered commands, keyed by name. Add new commands here. */
-const commands = {
-  ping: require("./ping"),
-  status: require("./status"),
-  switching: require("./switching"),
-  log: require("./log"),
-};
-
-/**
- * Whether an incoming LXMF message originates from one of the configured crew
- * members, by comparing the message source hash against the crew destinations.
- *
- * @param {{sourceHash?:Uint8Array}|null|undefined} message
- * @param {{crew?:unknown}|null|undefined} settings
- * @returns {boolean}
- */
-function isFromCrew(message, settings) {
-  if (!message || !message.sourceHash) {
-    return false;
-  }
-  const crew = effectiveCrew(settings && settings.crew);
-  if (crew.length === 0) {
-    return false;
-  }
-  const sourceHex = toHex(message.sourceHash);
-  return crew.some((member) => member.destinationHash === sourceHex);
-}
+const { commands, isFromCrew, availableExamples } = require("./registry");
+const fallback = require("./fallback");
 
 /**
  * Dispatches an incoming LXMF message to the first matching command.
@@ -64,7 +39,7 @@ function isFromCrew(message, settings) {
  *
  * @param {{sourceHash:Uint8Array, content?:string}|null|undefined} message
  * @param {object|null|undefined} settings
- * @param {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null)=>Promise<void>|undefined} deliver
+ * @param {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, opts?:object)=>Promise<void>|undefined} deliver
  * @param {{debug?:(...args:any[])=>void, error?:(...args:any[])=>void}|null|undefined} [app]
  * @param {Uint8Array|null|undefined} [linkId] - The arrival Link id to reply
  *   over, from the router's `event.detail.link`.
@@ -98,6 +73,23 @@ async function handleMessage(message, settings, deliver, app, linkId) {
     }
     // First match wins: stop after handling one command.
     return;
+  }
+  // Nothing accepted the message: the rate-limited fallback explains the node
+  // and lists what this sender may use. Failures are logged, not fatal — the
+  // sender simply stays unanswered until their next message.
+  try {
+    const answered = await fallback.handle(
+      message,
+      deliver,
+      availableExamples(settings, fromCrew),
+    );
+    if (answered && app && typeof app.debug === "function") {
+      app.debug("LXMF message answered with the fallback reply");
+    }
+  } catch (e) {
+    if (app && typeof app.error === "function") {
+      app.error(`LXMF fallback reply failed: ${e.message}`);
+    }
   }
 }
 

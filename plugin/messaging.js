@@ -32,6 +32,8 @@ const deps = {
   LXMessage,
   FIELD_TELEMETRY: LXMFConstants.FIELD_TELEMETRY,
   FIELD_ICON_APPEARANCE: LXMFConstants.FIELD_ICON_APPEARANCE,
+  FIELD_RENDERER: LXMFConstants.FIELD_RENDERER,
+  RENDERER_MARKDOWN: LXMFConstants.RENDERER_MARKDOWN,
   fromHex: RNS.fromHex,
   toHex: RNS.toHex,
 };
@@ -274,9 +276,10 @@ async function setupMessaging(rns, identity, options = {}, log = () => {}) {
 }
 
 /**
- * Builds a `deliver(destinationHashHex, title, content, linkId?)` callback
- * bound to the given router and sender identity. Each call constructs and
- * sends a single LXMF message to the recipient's `lxmf.delivery` destination.
+ * Builds a `deliver(destinationHashHex, title, content, linkId?, opts?)`
+ * callback bound to the given router and sender identity. Each call constructs
+ * and sends a single LXMF message to the recipient's `lxmf.delivery`
+ * destination.
  *
  * Delivery rides the shared outbound sender ({@link makeOutboundSender}): the
  * router tries the supplied arrival link first and escalates — opportunistic
@@ -298,20 +301,33 @@ async function setupMessaging(rns, identity, options = {}, log = () => {}) {
  * @param {object|((msg:string)=>void)} [options] - Outbound sender options
  *   (`debug`, `getEmbeddedNode`, `timeoutMs`) or, for convenience, a bare
  *   debug logger.
- * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null)=>Promise<object>}
- *   Resolves with the LXMessage that was sent.
+ * @returns {(destinationHashHex:string, title:string, content:string, linkId?:Uint8Array|null, opts?:{markdown?:boolean})=>Promise<object>}
+ *   Resolves with the LXMessage that was sent. The `opts.markdown` flag
+ *   attaches the LXMF `FIELD_RENDERER` field (`RENDERER_MARKDOWN`, §5.9.4) so
+ *   clients such as Sideband render the content as Markdown; without it (or
+ *   the flag) the message carries no fields and reads as plain text.
  */
 function makeDeliverer(lxmf, identity, options = {}) {
   const senderOptions = resolveSenderOptions(options);
   const sender = makeOutboundSender({ lxmf, identity, ...senderOptions });
   const debug = senderOptions.debug;
-  return async function deliver(destinationHashHex, title, content, linkId) {
-    const message = new deps.LXMessage({
+  return async function deliver(
+    destinationHashHex,
+    title,
+    content,
+    linkId,
+    opts = {},
+  ) {
+    const options = {
       sourceHash: lxmf.deliveryDest.destinationHash,
       destinationHash: deps.fromHex(destinationHashHex),
       title,
       content,
-    });
+    };
+    if (opts.markdown) {
+      options.fields = new Map([[deps.FIELD_RENDERER, deps.RENDERER_MARKDOWN]]);
+    }
+    const message = new deps.LXMessage(options);
     await sender(message, { linkId });
     debug(
       `LXMF message delivered to ${destinationHashHex}${

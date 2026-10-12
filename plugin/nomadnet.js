@@ -33,6 +33,8 @@ const deps = {
 const NODE_ASPECT = "nomadnetwork.node";
 /** Default page path NomadNet clients fetch (§11.6.1). */
 const INDEX_PATH = "/page/index.mu";
+/** Path of the passage-briefing page served beside the index. */
+const BRIEFING_PATH = "/page/briefing.mu";
 /** Heading shown when no vessel name is known yet. */
 const UNKNOWN_VESSEL = "Unknown vessel";
 
@@ -470,6 +472,10 @@ function telemetryContext(app) {
  * @param {unknown} [context.vesselName] - Value at `vessels.self.name`.
  * @param {unknown} [context.banner] - Optional multi-line ASCII/micron banner.
  * @param {unknown} [context.footer] - Optional multi-line ASCII/micron footer.
+ * @param {{path: string, label: string}[]} [context.crewPages] - Crew-only
+ *   page links, rendered as a "Crew" section of micron links. Only supplied
+ *   for identified crew: anonymous or non-crew viewers get no section at all
+ *   and never learn the pages exist.
  * @param {object} [context.telemetry] - Raw Signal K self-path values. The
  *   `position` key takes the `navigation.position` object
  *   (`{latitude, longitude}`, optionally `{value}` wrapped).
@@ -495,6 +501,20 @@ function renderPage(context = {}) {
   if (footer) {
     lines.push("");
     lines.push(footer);
+  }
+
+  const crewPages = (Array.isArray(cfg.crewPages) ? cfg.crewPages : [])
+    .map((page) => ({
+      path: readString(page && page.path),
+      label: readString(page && page.label) || "Untitled",
+    }))
+    .filter((page) => page.path);
+  if (crewPages.length) {
+    lines.push("");
+    lines.push(">Crew");
+    for (const page of crewPages) {
+      lines.push(`[${page.label}](${page.path})`);
+    }
   }
 
   return `${lines.join("\n")}\n`;
@@ -557,10 +577,15 @@ function identityLabel(identity) {
  * @param {number} [options.announceIntervalMs] - When positive, re-announce
  *   the node destination at this cadence (first announce fires immediately)
  *   instead of announcing once.
- * @param {() => {vesselName?: unknown, banner?: unknown, telemetry?: object}}
- *   [options.getContext] - Called on each page request to build the render
- *   context (vessel name, optional banner, raw telemetry values), so the page
- *   stays live.
+ * @param {(remoteIdentity?: unknown) => {vesselName?: unknown, banner?: unknown, telemetry?: object, crewPages?: {path: string, label: string}[]}}
+ *   [options.getContext] - Called on each page request with the requester's
+ *   identity (null for an anonymous, non-identified link) to build the render
+ *   context (vessel name, optional banner, raw telemetry values, crew links),
+ *   so the page stays live and per-viewer.
+ * @param {(remoteIdentity?: unknown) => Promise<string>|string} [options.getCrewPage]
+ *   Optional micron provider for the `/page/briefing.mu` crew page; when
+ *   given, the page is registered beside the index. The provider is
+ *   responsible for checking that the requester is crew.
  * @param {(...args:any[])=>void} [log]
  * @returns {Promise<object>} The NomadNet site handle.
  */
@@ -584,14 +609,22 @@ async function setupNomadNet(rns, identity, options = {}, log = () => {}) {
   rns.transport.bindLocalDestination(dest);
   rns.registerDestination(dest);
 
-  await dest.registerRequestHandler(INDEX_PATH, {
-    responseGenerator: async (
-      path,
-      data,
-      _requestId,
-      remoteIdentity,
-      _requestTime,
-    ) => {
+  /** Page paths this site registered, so stop() removes them all. */
+  const registeredPaths = [];
+
+  /**
+   * Wraps a page body provider in the §11 response generator with the
+   * shared request logging: HTTP-style method/status synthesized from the
+   * protocol's own conventions, elapsed time and requester identity.
+   *
+   * @param {(path: string, data: unknown, remoteIdentity: unknown) => Promise<string>|string} getPage
+   *   Called with the request path, form data (null for a plain fetch) and
+   *   the requester's identity (null for an anonymous, non-identified link).
+   * @returns {(path: string, data: unknown, requestId: unknown, remoteIdentity: unknown, requestTime: unknown) => Promise<Uint8Array>}
+   */
+  const makeResponseGenerator =
+    (getPage) =>
+    async (path, data, _requestId, remoteIdentity, _requestTime) => {
       const start = Date.now();
       // NomadNet's §11 REQUEST/RESPONSE has no HTTP method or status code.
       // Mirror the protocol's own data convention to derive them for the log:
@@ -602,7 +635,7 @@ async function setupNomadNet(rns, identity, options = {}, log = () => {}) {
       let status = 200;
       let body;
       try {
-        body = encodeUtf8(renderPage(getContext()));
+        body = encodeUtf8(String(await getPage(path, data, remoteIdentity)));
       } catch (e) {
         status = 500;
         body = encodeUtf8(`>>Error\n\n${e.message}\n`);
@@ -620,9 +653,33 @@ async function setupNomadNet(rns, identity, options = {}, log = () => {}) {
         }),
       );
       return body;
-    },
+    };
+
+  await dest.registerRequestHandler(INDEX_PATH, {
+    responseGenerator: makeResponseGenerator((_path, _data, remoteIdentity) =>
+      // The requester's identity decides which links the page shows: crew
+      // pages are linked only to identified crew
+      renderPage(getContext(remoteIdentity)),
+    ),
     allow: deps.Allow.ALL,
   });
+  registeredPaths.push(INDEX_PATH);
+
+  // Crew pages: the index links them only to identified crew (see
+  // renderPage's crewPages context key), and the provider re-checks the
+  // requester itself so a peer who knows the path by heart gets a crew-only
+  // notice instead of the page. Anonymous requests see that notice too — a
+  // deliberate trade: Allow.LIST would silently time out every client that
+  // does not LINKIDENTIFY, crew included.
+  if (typeof cfg.getCrewPage === "function") {
+    await dest.registerRequestHandler(BRIEFING_PATH, {
+      responseGenerator: makeResponseGenerator((_path, _data, remoteIdentity) =>
+        cfg.getCrewPage(remoteIdentity),
+      ),
+      allow: deps.Allow.ALL,
+    });
+    registeredPaths.push(BRIEFING_PATH);
+  }
 
   // Accept incoming Links so page REQUESTs can be served. Without this the
   // destination is only *visible* (announce heard) but never completes the
@@ -678,6 +735,7 @@ async function setupNomadNet(rns, identity, options = {}, log = () => {}) {
     destination: dest,
     destinationHash: dest.destinationHash,
     indexPath: INDEX_PATH,
+    crewPagePath: typeof cfg.getCrewPage === "function" ? BRIEFING_PATH : null,
     /**
      * Deregisters the page handler and removes the destination from the node.
      * Best-effort: per-step failures are swallowed so teardown always completes.
@@ -699,6 +757,13 @@ async function setupNomadNet(rns, identity, options = {}, log = () => {}) {
         await dest.removeRequestHandler(INDEX_PATH);
       } catch {
         /* best effort */
+      }
+      for (const extraPath of registeredPaths.slice(1)) {
+        try {
+          await dest.removeRequestHandler(extraPath);
+        } catch {
+          /* best effort */
+        }
       }
       try {
         rns.deregisterDestination(dest);
@@ -742,6 +807,7 @@ module.exports = {
   deps,
   NODE_ASPECT,
   INDEX_PATH,
+  BRIEFING_PATH,
   UNKNOWN_VESSEL,
   MS_TO_KNOTS,
   RAD_TO_DEG,

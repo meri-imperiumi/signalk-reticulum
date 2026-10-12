@@ -566,6 +566,54 @@ test("renderPage omits individual readings that are not available", () => {
   assert.equal(page, ">>Boat\n\n>Vessel status\nVessel is moored\n");
 });
 
+test("renderPage renders crew page links as a Crew section", () => {
+  const page = renderPage({
+    vesselName: "Boat",
+    crewPages: [
+      { path: "/page/briefing.mu", label: "Passage briefing" },
+      { path: "/page/watch.mu", label: "Watch plan" },
+    ],
+  });
+  assert.equal(
+    page,
+    ">>Boat\n\n>Crew\n[Passage briefing](/page/briefing.mu)\n[Watch plan](/page/watch.mu)\n",
+  );
+});
+
+test("renderPage omits the Crew section entirely when it is empty or absent", () => {
+  assert.equal(renderPage({ vesselName: "Boat", crewPages: [] }), ">>Boat\n");
+  assert.equal(renderPage({ vesselName: "Boat" }), ">>Boat\n");
+  // Malformed entries are skipped, not rendered as broken links: with no
+  // valid link left there is no section at all
+  assert.equal(
+    renderPage({ vesselName: "Boat", crewPages: [{ label: "No path" }, null] }),
+    ">>Boat\n",
+  );
+});
+
+test("renderPage renders crew page links as a Crew section", () => {
+  const page = renderPage({
+    vesselName: "Boat",
+    crewPages: [
+      { path: "/page/briefing.mu", label: "Passage briefing" },
+      { path: "/page/watch.mu", label: "Watch plan" },
+    ],
+  });
+  assert.equal(
+    page,
+    ">>Boat\n\n>Crew\n[Passage briefing](/page/briefing.mu)\n[Watch plan](/page/watch.mu)\n",
+  );
+});
+
+test("renderPage omits the Crew section entirely when it is empty, absent or has no valid links", () => {
+  assert.equal(renderPage({ vesselName: "Boat", crewPages: [] }), ">>Boat\n");
+  assert.equal(renderPage({ vesselName: "Boat" }), ">>Boat\n");
+  assert.equal(
+    renderPage({ vesselName: "Boat", crewPages: [{ label: "No path" }, null] }),
+    ">>Boat\n",
+  );
+});
+
 test("renderPage omits the telemetry section entirely when nothing is available", () => {
   assert.equal(renderPage({ vesselName: "Boat" }), ">>Boat\n");
   assert.equal(renderPage({ vesselName: "Boat", telemetry: {} }), ">>Boat\n");
@@ -645,6 +693,47 @@ test("the index handler returns the live page bytes built from getContext", asyn
     ">>Renamed\n",
     "getContext is re-evaluated on each request",
   );
+
+  FakeDestination.instances.length = 0;
+  Object.assign(deps, REAL_DEPS);
+});
+
+test("page handlers receive the requester's identity for per-viewer rendering", async () => {
+  deps.Destination = FakeDestination;
+  deps.toHex = () => "00";
+  const rns = makeRns();
+  const seen = [];
+  const identity = { identityHash: new Uint8Array([1, 2, 3]) };
+
+  const site = await setupNomadNet(
+    rns,
+    {},
+    {
+      displayName: "Boat",
+      getContext: (remoteIdentity) => {
+        seen.push(["index", remoteIdentity]);
+        return { vesselName: "Boat" };
+      },
+      getCrewPage: (remoteIdentity) => {
+        seen.push(["crew", remoteIdentity]);
+        return ">Crew page\n";
+      },
+    },
+  );
+
+  const indexHandler = site.destination.registered[0].options.responseGenerator;
+  const crewHandler = site.destination.registered[1].options.responseGenerator;
+  await indexHandler("/page/index.mu", null, new Uint8Array(16), identity, 0);
+  await crewHandler("/page/briefing.mu", null, new Uint8Array(16), identity, 0);
+
+  assert.deepEqual(seen, [
+    ["index", identity],
+    ["crew", identity],
+  ]);
+
+  // An anonymous link (no LINKIDENTIFY) reaches the handlers with null
+  await indexHandler("/page/index.mu", null, new Uint8Array(16), null, 0);
+  assert.deepEqual(seen[2], ["index", null]);
 
   FakeDestination.instances.length = 0;
   Object.assign(deps, REAL_DEPS);

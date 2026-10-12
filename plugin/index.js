@@ -31,13 +31,19 @@ const {
   makeTelemetryDeliverer,
   verifySender,
 } = require("./messaging");
-const { setupNomadNet } = require("./nomadnet");
+const { setupNomadNet, BRIEFING_PATH } = require("./nomadnet");
 const {
   readNumber,
   readPosition,
   readString,
   telemetryContext,
 } = require("./nomadnet");
+const {
+  loadBriefing,
+  briefMeta,
+  briefingPage,
+  briefingAvailable,
+} = require("./briefing");
 const compression = require("./compression");
 const { resolveDisplayName } = require("./displayname");
 const { resolveAppearance } = require("./appearance");
@@ -57,7 +63,7 @@ const {
   setupEmbeddedPropagationNode,
   setupEmbeddedRFedNode,
 } = require("./embedded-nodes");
-const { effectiveCrew } = require("./notifications");
+const { effectiveCrew, isCrewIdentity } = require("./notifications");
 const { buildTelemetrySensors, packTelemetry } = require("./telemetry");
 const {
   handleInboundTelemetry,
@@ -976,9 +982,9 @@ module.exports = (app) => {
                 // Replies ride the outbound deliverer so an unreachable peer
                 // gets the reply via the propagation node (store-and-forward)
                 // instead of losing it — same policy as notification alerts.
-                (dest, title, content, linkId) =>
+                (dest, title, content, linkId, opts) =>
                   deps.withTimeout(
-                    () => deliver(dest, title, content, linkId),
+                    () => deliver(dest, title, content, linkId, opts),
                     120_000,
                     "LXMF delivery",
                   ),
@@ -1695,6 +1701,14 @@ module.exports = (app) => {
         // the mesh. Opt-in: nothing is announced or served unless enabled.
         if (config && config.nomadnet && config.nomadnet.enabled) {
           try {
+            // The crew briefing page is served only when the
+            // signalk-passage-briefing plugin has a data dir here AND crew is
+            // configured — without either there is nobody who could ever see
+            // it. The LXMF Briefing command answers "No briefing available"
+            // on its own when the plugin is missing.
+            const briefingReady = await briefingAvailable(app);
+            const crewConfigured = effectiveCrew(config.crew).length > 0;
+            const serveCrewBriefing = briefingReady && crewConfigured;
             const nodeDisplayName = resolveDisplayName({
               configured: config.nomadnet && config.nomadnet.display_name,
               vesselName: readSelf(app, "name"),
@@ -1706,14 +1720,53 @@ module.exports = (app) => {
               {
                 displayName: nodeDisplayName,
                 announceIntervalMs,
-                getContext: () => ({
+                getContext: (remoteIdentity) => ({
                   vesselName: readSelf(app, "name"),
                   banner: config.nomadnet && config.nomadnet.banner,
                   footer: config.nomadnet && config.nomadnet.footer,
                   // Shared with the LXMF Status command, so the browsed page
                   // and the mesh reply always agree
                   telemetry: telemetryContext(app),
+                  // Crew pages are linked from the index only to identified
+                  // crew; anonymous or non-crew viewers get no section and
+                  // never learn the pages exist
+                  ...(serveCrewBriefing &&
+                  isCrewIdentity(remoteIdentity, config.crew, app.debug)
+                    ? {
+                        crewPages: [
+                          { path: BRIEFING_PATH, label: "Passage briefing" },
+                        ],
+                      }
+                    : {}),
                 }),
+                // Crew-only page: the provider re-checks the requester so a
+                // peer who knows the path by heart gets a crew-only notice
+                // instead of the briefing
+                ...(serveCrewBriefing
+                  ? {
+                      getCrewPage: async (remoteIdentity) => {
+                        if (
+                          !isCrewIdentity(
+                            remoteIdentity,
+                            config.crew,
+                            app.debug,
+                          )
+                        ) {
+                          return (
+                            ">Passage briefing\n\n" +
+                            "Crew only. The node serves crew pages to " +
+                            "identified crew members.\n"
+                          );
+                        }
+                        const briefing = await loadBriefing(app);
+                        return briefingPage({
+                          payload: briefing?.payload,
+                          meta: briefMeta(app),
+                          now: new Date(),
+                        });
+                      },
+                    }
+                  : {}),
               },
               app.debug,
             );

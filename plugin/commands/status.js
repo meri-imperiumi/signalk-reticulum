@@ -10,6 +10,10 @@
  * reply rides the arrival Link or falls back to store-and-forward), so the
  * whole report goes out as a single message — no radio-packet splitting.
  *
+ * The reply carries the LXMF `FIELD_RENDERER` Markdown field (§5.9.4) with
+ * the reading labels bolded — the wording stays identical to the NomadNet
+ * page's lines, so the two views cannot drift apart.
+ *
  * Available to everyone (not crew-only), mirroring the `signalk-meshtastic`
  * status command.
  *
@@ -18,6 +22,7 @@
 
 const { toHex } = require("@reticulum/core");
 const { telemetryContext, telemetryLines } = require("../nomadnet");
+const { markdownize } = require("../markdown");
 
 /** Reply shown when the server reports none of the known readings. */
 const EMPTY_REPLY = "No telemetry available";
@@ -39,8 +44,9 @@ module.exports = {
     return deliver(
       toHex(message.sourceHash),
       "",
-      lines.length ? lines.join("\n") : EMPTY_REPLY,
+      lines.length ? lines.map(markdownize).join("\n") : EMPTY_REPLY,
       linkId,
+      { markdown: true },
     );
   },
 };

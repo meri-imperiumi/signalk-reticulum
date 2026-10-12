@@ -14,6 +14,7 @@
  * @file notifications.js
  */
 
+const { toHex } = require("@reticulum/core");
 const { deriveLxmfDestinationHash } = require("./identity");
 
 /**
@@ -228,7 +229,9 @@ function buildAlertMessage(path, value) {
  * destination hash — the address LXMF messages are delivered to — is derived.
  * Using the identity hash instead of the raw LXMF destination hash means the
  * same crew entry can later be reached over other protocols that share the
- * identity (e.g. identified NomadNet page requests) without reconfiguration.
+ * identity (e.g. identified NomadNet page requests) without reconfiguration;
+ * the raw identity hash rides along in the `identityHash` field for such
+ * identity-based matching.
  *
  * For backward compatibility an entry may instead carry a legacy `destination`
  * field (a raw `lxmf.delivery` destination hash); it is used verbatim. Entries
@@ -257,6 +260,7 @@ function effectiveCrew(crew, log) {
       result.push({
         name: name || identityHash,
         destinationHash: deriveLxmfDestinationHash(identityHash),
+        identityHash,
       });
       continue;
     }
@@ -279,6 +283,32 @@ function effectiveCrew(crew, log) {
     }
   }
   return result;
+}
+
+/**
+ * Whether a Reticulum identity belongs to one of the configured crew members
+ * — the crew-side check for identified NomadNet page requests: the link
+ * carries the peer's raw identity hash, compared against the crew list.
+ *
+ * Only crew entries configured by identity hash can match: a legacy
+ * destination-only entry has no identity on file to compare against, and a
+ * page request carries no LXMF destination. Anonymous links (no
+ * LINKIDENTIFY) match nothing, by definition.
+ *
+ * @param {{identityHash?:Uint8Array}|null|undefined} identity - The remote
+ *   identity of an identified link, or null for an anonymous one.
+ * @param {unknown} crew - The configured crew list (see {@link effectiveCrew}).
+ * @param {(...args:any[])=>void} [log] - Called for each skipped crew entry.
+ * @returns {boolean}
+ */
+function isCrewIdentity(identity, crew, log) {
+  if (!identity || !(identity.identityHash instanceof Uint8Array)) {
+    return false;
+  }
+  const identityHashHex = toHex(identity.identityHash);
+  return effectiveCrew(crew, log).some(
+    (member) => member.identityHash === identityHashHex,
+  );
 }
 
 /**
@@ -418,6 +448,7 @@ module.exports = {
   shouldWeSendNotification,
   buildAlertMessage,
   effectiveCrew,
+  isCrewIdentity,
   sendNotification,
   sweepNotifications,
 };

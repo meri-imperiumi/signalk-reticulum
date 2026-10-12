@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { commands, isFromCrew, handleMessage } = require("../plugin/commands");
+const fallback = require("../plugin/commands/fallback");
 const ping = require("../plugin/commands/ping");
 const { fromHex } = require("@reticulum/core");
 const { deriveLxmfDestinationHash } = require("../plugin/identity");
@@ -134,10 +135,17 @@ test("handleMessage forwards the arrival link id to the command's reply", async 
   );
 });
 
-test("handleMessage does not reply to unmatched messages", async () => {
+test("handleMessage answers unmatched messages with the rate-limited fallback", async () => {
+  fallback.reset();
   const { deliver, calls } = makeDeliver();
   await handleMessage(makeMessage("unknown"), {}, deliver, {});
-  assert.equal(calls.length, 0);
+  assert.equal(calls.length, 1, "one fallback reply");
+  assert.match(calls[0].content, /Automated boat node/);
+  // The rate limit keeps a second unmatched message from the same sender
+  // silent within the hour
+  await handleMessage(makeMessage("still unknown"), {}, deliver, {});
+  assert.equal(calls.length, 1, "rate limited to one reply per sender");
+  fallback.reset();
 });
 
 test("handleMessage does nothing without a deliver callback", async () => {

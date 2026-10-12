@@ -7,6 +7,7 @@ const {
   shouldWeSendNotification,
   buildAlertMessage,
   effectiveCrew,
+  isCrewIdentity,
   sendNotification,
   sweepNotifications,
 } = require("../plugin/notifications");
@@ -222,8 +223,8 @@ describe("effectiveCrew", () => {
       { name: "Bob", identity: `  ${VALID}  ` },
     ]);
     assert.deepEqual(crew, [
-      { name: "Alice", destinationHash: DERIVED },
-      { name: "Bob", destinationHash: DERIVED },
+      { name: "Alice", destinationHash: DERIVED, identityHash: VALID },
+      { name: "Bob", destinationHash: DERIVED, identityHash: VALID },
     ]);
     // Sanity: the derived hash differs from the raw identity hash, and is
     // still a 32-char hex value.
@@ -240,13 +241,71 @@ describe("effectiveCrew", () => {
     const crew = effectiveCrew([
       { name: "Dan", identity: VALID, destination: "f".repeat(32) },
     ]);
-    assert.deepEqual(crew, [{ name: "Dan", destinationHash: DERIVED }]);
+    assert.deepEqual(crew, [
+      { name: "Dan", destinationHash: DERIVED, identityHash: VALID },
+    ]);
   });
 
   it("uses the identity hash as the name fallback for identity entries", () => {
     const crew = effectiveCrew([{ identity: VALID }]);
     assert.equal(crew[0].name, VALID);
     assert.equal(crew[0].destinationHash, DERIVED);
+  });
+
+  describe("isCrewIdentity", () => {
+    const IDENTITY_BYTES = Buffer.from(VALID, "hex");
+
+    it("matches a link identity configured by identity hash", () => {
+      assert.equal(
+        isCrewIdentity({ identityHash: IDENTITY_BYTES }, [
+          { name: "Alice", identity: VALID },
+        ]),
+        true,
+      );
+    });
+
+    it("matches an identity configured with different casing or whitespace", () => {
+      assert.equal(
+        isCrewIdentity({ identityHash: IDENTITY_BYTES }, [
+          { name: "Alice", identity: ` ${VALID.toUpperCase()} ` },
+        ]),
+        true,
+      );
+    });
+
+    it("rejects an anonymous link (no remote identity)", () => {
+      assert.equal(
+        isCrewIdentity(null, [{ name: "Alice", identity: VALID }]),
+        false,
+      );
+      assert.equal(
+        isCrewIdentity({}, [{ name: "Alice", identity: VALID }]),
+        false,
+      );
+    });
+
+    it("rejects an identity that is not on the crew list", () => {
+      assert.equal(
+        isCrewIdentity({ identityHash: Buffer.alloc(16, 9) }, [
+          { name: "Alice", identity: VALID },
+        ]),
+        false,
+      );
+    });
+
+    it("rejects when no crew is configured at all", () => {
+      assert.equal(isCrewIdentity({ identityHash: IDENTITY_BYTES }, []), false);
+      assert.equal(isCrewIdentity({ identityHash: IDENTITY_BYTES }), false);
+    });
+
+    it("cannot match legacy destination-only crew entries", () => {
+      assert.equal(
+        isCrewIdentity({ identityHash: IDENTITY_BYTES }, [
+          { name: "Carol", destination: VALID },
+        ]),
+        false,
+      );
+    });
   });
 
   it("skips entries with neither a valid identity nor a legacy destination", () => {

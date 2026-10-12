@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { commands, handleMessage } = require("../plugin/commands");
+const fallback = require("../plugin/commands/fallback");
 const log = require("../plugin/commands/log");
 const { fromHex } = require("@reticulum/core");
 const { deriveLxmfDestinationHash } = require("../plugin/identity");
@@ -251,6 +252,7 @@ test("handleMessage dispatches a crew log entry and replies", async () => {
 });
 
 test("handleMessage does not let a non-crew sender write logbook entries", async () => {
+  fallback.reset();
   const { deliver, calls } = makeDeliver();
   const app = makeApp();
   const other = new Uint8Array(16).fill(1);
@@ -261,5 +263,10 @@ test("handleMessage does not let a non-crew sender write logbook entries", async
     app,
   );
   assert.equal(app.writes.length, 0);
-  assert.equal(calls.length, 0);
+  // The log command is skipped for non-crew; the fallback explains the node
+  // instead (and lists only the public commands)
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].content, /Automated boat node/);
+  assert.ok(!calls[0].content.includes("Log"), "no crew commands listed");
+  fallback.reset();
 });

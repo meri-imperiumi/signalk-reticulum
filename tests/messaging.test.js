@@ -302,6 +302,34 @@ test("makeDeliverer forwards the arrival link id so replies ride back over the e
   Object.assign(deps, REAL_DEPS);
 });
 
+test("makeDeliverer attaches the Markdown renderer field when asked", async () => {
+  const router = new FakeLxmRouter({}, {});
+  const identity = { id: "me" };
+  deps.LXMessage = FakeLXMessage;
+  deps.FIELD_RENDERER = 0x0f;
+  deps.RENDERER_MARKDOWN = 0x02;
+  deps.fromHex = (hex) => Buffer.from(hex, "hex");
+
+  const deliver = makeDeliverer(router, identity);
+  await deliver("0123456789abcdef0123456789abcdef", "", "**Bold**", null, {
+    markdown: true,
+  });
+  await deliver("0123456789abcdef0123456789abcdef", "", "Plain");
+
+  assert.equal(router.sent.length, 2);
+  assert.deepEqual(
+    router.sent[0].message.options.fields,
+    new Map([[0x0f, 0x02]]),
+  );
+  assert.equal(
+    router.sent[1].message.options.fields,
+    undefined,
+    "plain replies carry no fields",
+  );
+
+  Object.assign(deps, REAL_DEPS);
+});
+
 test("makeDeliverer escalates to opportunistic delivery when the link reply fails", async () => {
   const router = new FakeLxmRouter({}, {});
   const identity = { id: "me" };

@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { join } = require("node:path");
 const os = require("node:os");
+const { mkdirSync, writeFileSync, rmSync } = require("node:fs");
 
 const { Identity, toHex } = require("@reticulum/core");
 const { listInterfaces, FileStorageAdapter } = require("@reticulum/node");
@@ -14,6 +15,7 @@ const {
 const makePlugin = require("../plugin/index.js");
 const messaging = require("../plugin/messaging");
 const nomadnet = require("../plugin/nomadnet");
+const fallback = require("../plugin/commands/fallback");
 const compression = require("../plugin/compression");
 const rfed = require("../plugin/rfed");
 const embeddedNodes = require("../plugin/embedded-nodes");
@@ -1476,11 +1478,12 @@ test("a forged crew message (invalid signature) is dropped as a possible forgery
   await plugin.stop();
 });
 
-test("an unmatched LXMF message does not trigger a reply", async () => {
+test("an unmatched LXMF message gets the rate-limited fallback reply", async () => {
   const app = makeApp();
   const plugin = makePlugin(app);
   await plugin.start({ messaging: {} });
   const router = plugin.lxmf;
+  fallback.reset();
 
   router.dispatchEvent(
     new CustomEvent("message", {
@@ -1494,7 +1497,9 @@ test("an unmatched LXMF message does not trigger a reply", async () => {
   );
   await new Promise((resolve) => setTimeout(resolve, 10));
 
-  assert.equal(router.sent.length, 0);
+  assert.equal(router.sent.length, 1, "one fallback reply");
+  assert.match(router.sent[0].message.options.content, /Automated boat node/);
+  fallback.reset();
 });
 
 // --- Inbound crew telemetry -> Signal K -----------------------------------
@@ -2342,6 +2347,7 @@ test("start brings up the NomadNet site, announces and serves the index page", a
   );
   assert.deepEqual(
     dest.registered.map((r) => r.path),
+    // Without the passage-briefing plugin's data dir there is no briefing page
     ["/page/index.mu"],
   );
   assert.equal(dest.announceCalls, 0, "no one-shot announce");
@@ -2362,6 +2368,128 @@ test("the served index page shows the vessel name", async () => {
   const dest = FakeNomadDestination.instances[0];
   const page = await dest.registered[0].options.responseGenerator();
   assert.deepEqual(Buffer.from(page).toString("utf8"), ">>S/Y Bergie\n");
+});
+
+test("start serves the briefing page to identified crew and links it from the index", async () => {
+  const app = makeApp();
+  app.getSelfPath = (path) =>
+    path === "name" ? { value: "S/Y Bergie" } : undefined;
+  // A passage-briefing cache with one compiled here payload
+  const root = join(
+    os.tmpdir(),
+    `sk-reticulum-brief-${process.pid}-${Date.now()}`,
+  );
+  const weather = join(
+    root,
+    "plugin-config-data",
+    "signalk-passage-briefing",
+    "weather",
+  );
+  mkdirSync(weather, { recursive: true });
+  writeFileSync(
+    join(weather, "here.json"),
+    JSON.stringify({
+      metadata: { fetchedAt: "2026-10-12T08:00:00.000Z", mode: "here" },
+      comfortTier: "easy",
+      waypoints: [
+        {
+          lat: 60.1,
+          lon: 21.5,
+          forecasts: [
+            {
+              timestamp: "2026-10-12T08:00",
+              surface: { tws: 12, twd: 225, mslp: 1010, gust: 18 },
+              marine: { hsCombined: 1.0, tpCombined: 6 },
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  app.config = { configPath: root };
+  const plugin = makePlugin(app);
+  FakeNomadDestination.instances.length = 0;
+
+  // The crew member is configured by identity hash, and the requesting link
+  // carries that same identity
+  const crewIdentityHex = Buffer.alloc(16, 3).toString("hex");
+  const crewIdentity = { identityHash: Buffer.from(crewIdentityHex, "hex") };
+
+  try {
+    await plugin.start({
+      nomadnet: { enabled: true },
+      crew: [{ name: "Test Crew", identity: crewIdentityHex }],
+    });
+
+    const dest = FakeNomadDestination.instances[0];
+    assert.deepEqual(
+      dest.registered.map((r) => r.path),
+      ["/page/index.mu", "/page/briefing.mu"],
+    );
+
+    // A crew member's identified link: the index links the briefing page,
+    // and the briefing page itself renders
+    const indexGenerator = dest.registered[0].options.responseGenerator;
+    const crewPage = await indexGenerator(
+      "/page/index.mu",
+      null,
+      new Uint8Array(16),
+      crewIdentity,
+      0,
+    );
+    assert.match(Buffer.from(crewPage).toString("utf8"), />Crew/);
+    assert.match(
+      Buffer.from(crewPage).toString("utf8"),
+      /\[Passage briefing\]\(\/page\/briefing\.mu\)/,
+    );
+    const briefing = await dest.registered[1].options.responseGenerator(
+      "/page/briefing.mu",
+      null,
+      new Uint8Array(16),
+      crewIdentity,
+      0,
+    );
+    assert.match(
+      Buffer.from(briefing).toString("utf8"),
+      />Passage briefing\n\nCompiled 10-12 08:00Z/,
+    );
+
+    // An anonymous link: no Crew section on the index, and a crew-only
+    // notice on the page itself instead of the briefing
+    const anonymousIndex = await indexGenerator(
+      "/page/index.mu",
+      null,
+      new Uint8Array(16),
+      null,
+      0,
+    );
+    assert.doesNotMatch(Buffer.from(anonymousIndex).toString("utf8"), />Crew/);
+    const anonymousPage = await dest.registered[1].options.responseGenerator(
+      "/page/briefing.mu",
+      null,
+      new Uint8Array(16),
+      null,
+      0,
+    );
+    assert.match(Buffer.from(anonymousPage).toString("utf8"), /Crew only/);
+    assert.doesNotMatch(
+      Buffer.from(anonymousPage).toString("utf8"),
+      /Compiled/,
+    );
+
+    // A non-crew identified link gets the same treatment
+    const stranger = { identityHash: Buffer.alloc(16, 9) };
+    const strangerPage = await dest.registered[1].options.responseGenerator(
+      "/page/briefing.mu",
+      null,
+      new Uint8Array(16),
+      stranger,
+      0,
+    );
+    assert.match(Buffer.from(strangerPage).toString("utf8"), /Crew only/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the served index page includes live telemetry from Signal K", async () => {
