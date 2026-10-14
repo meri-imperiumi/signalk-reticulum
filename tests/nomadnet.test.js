@@ -577,13 +577,13 @@ test("renderPage renders crew page links as Micron links in a Crew section", () 
       { path: "/page/watch.mu", label: "Watch plan" },
     ],
   });
-  // Micron link syntax [label`target], backtick-separated — NOT Markdown's
-  // [label](target), which Micron renders as literal text
+  // Micron link syntax `[label`target] — backtick-separated, and the leading
+  // backtick is mandatory: both NomadNet's MicronParser.py and Columba's
+  // parser only recognize a link from formatting mode (the `` `[ ``
+  // sequence), so a bare `[` renders as literal text
   assert.equal(
     page,
-    ">>Boat\n\n>Crew\n" +
-      `[Passage briefing\`${"ab".repeat(16)}:/page/briefing.mu]\n` +
-      `[Watch plan\`${"ab".repeat(16)}:/page/watch.mu]\n`,
+    `>>Boat\n\n>Crew\n\`[Passage briefing\`${"ab".repeat(16)}:/page/briefing.mu]\n\`[Watch plan\`${"ab".repeat(16)}:/page/watch.mu]\n`,
   );
 });
 
@@ -592,7 +592,10 @@ test("renderPage falls back to bare-path crew link targets without a self hash",
     vesselName: "Boat",
     crewPages: [{ path: "/page/briefing.mu", label: "Passage briefing" }],
   });
-  assert.equal(page, ">>Boat\n\n>Crew\n[Passage briefing`/page/briefing.mu]\n");
+  assert.equal(
+    page,
+    ">>Boat\n\n>Crew\n`[Passage briefing`/page/briefing.mu]\n",
+  );
 });
 
 test("renderPage omits the Crew section entirely when it is empty, absent or has no valid links", () => {

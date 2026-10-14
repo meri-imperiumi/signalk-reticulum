@@ -518,16 +518,19 @@ function renderPage(context = {}) {
   if (crewPages.length) {
     lines.push("");
     lines.push(">Crew");
-    // Micron link syntax: [label`target], backtick-separated (NOT Markdown's
-    // [label](target) — Micron has no parentheses form, so that rendered as
-    // literal text and the link did nothing when tapped). The target carries
+    // Micron link syntax: `[label`target] — backtick-separated, and the
+    // LEADING backtick is mandatory: in both NomadNet's MicronParser.py and
+    // Columba's parser a link is only recognized from within formatting
+    // mode, i.e. the `` `[ `` sequence — a bare `[` is literal text and the
+    // inner backtick then swallows the rest of the line as formatting noise.
+    // (Markdown's [label](target) is not Micron at all.) The target carries
     // this node's destination hash when known — `<hash>:/page/x.mu` is the
     // form the Micron reference documents and the only one every client
     // navigates correctly.
     const selfHash = readString(cfg.selfHash);
     const prefix = selfHash ? `${selfHash}:` : "";
     for (const page of crewPages) {
-      lines.push(`[${page.label}\`${prefix}${page.path}]`);
+      lines.push(`\`[${page.label}\`${prefix}${page.path}]`);
     }
   }
 
