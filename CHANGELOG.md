@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+### Changed
+- **The plugin uses the fast `node:crypto` proof-of-work stamp engine from `@reticulum` 0.9.9** (work doc #45) instead of the WebCrypto default. Plugin start installs `@reticulum/node`'s `nodeStamper` process-globally via `useNodeStamper()`, covering outbound LXMF stamp generation, propagation blob/peering validation and rfed channel stamps: workblock builds are ~18× faster (`hkdfSync` + `createHash` instead of per-round WebCrypto calls), stamp generation ~270× faster with an LRU workblock cache for repeat validations, and workblock builds plus stamp generation run in a worker thread so stamping never blocks the Signal K event loop. Wire format and validation semantics are byte-identical to the previous engine (and the Python reference), so no mesh behaviour changes; the install is best-effort, falling back to the WebCrypto default if it fails, and the worker is released on plugin stop.
 
 ## [0.7.2] - 2026-10-12
 ### Fixed

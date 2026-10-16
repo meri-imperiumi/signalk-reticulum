@@ -702,6 +702,55 @@ test("start keeps running without a compression provider when bzip2 init fails",
   }
 });
 
+test("start installs the fast node stamper and stop releases it", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  const calls = { install: 0, stop: 0 };
+  const realUse = makePlugin.deps.useNodeStamper;
+  const realStop = makePlugin.deps.stopNodeStamper;
+  makePlugin.deps.useNodeStamper = () => {
+    calls.install += 1;
+  };
+  makePlugin.deps.stopNodeStamper = () => {
+    calls.stop += 1;
+  };
+
+  try {
+    await plugin.start({});
+    assert.equal(calls.install, 1, "fast stamper installed on start");
+    await plugin.stop();
+    assert.equal(calls.stop, 1, "fast stamper released on stop");
+  } finally {
+    makePlugin.deps.useNodeStamper = realUse;
+    makePlugin.deps.stopNodeStamper = realStop;
+  }
+});
+
+test("start keeps running when the fast stamper install fails", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  const realUse = makePlugin.deps.useNodeStamper;
+  const realStop = makePlugin.deps.stopNodeStamper;
+  makePlugin.deps.useNodeStamper = () => {
+    throw new Error("no worker threads");
+  };
+  makePlugin.deps.stopNodeStamper = () => {};
+
+  try {
+    await plugin.start({});
+    assert.ok(plugin.rns, "node still set up");
+    assert.ok(
+      app.debugCalls.some((args) =>
+        /Fast stamper install failed/.test(args.join(" ")),
+      ),
+    );
+    await plugin.stop();
+  } finally {
+    makePlugin.deps.useNodeStamper = realUse;
+    makePlugin.deps.stopNodeStamper = realStop;
+  }
+});
+
 test("schema exposes a Reticulum log level selector defaulting to notice", () => {
   const plugin = makePlugin(makeApp());
   const logLevel = plugin.schema().properties.log_level;

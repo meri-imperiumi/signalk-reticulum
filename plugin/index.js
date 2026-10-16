@@ -10,6 +10,8 @@ const {
   getInterface,
   listInterfaces,
   LocalClientInterface,
+  useNodeStamper,
+  stopNodeStamper,
 } = require("@reticulum/node");
 const {
   buildPluginSchema,
@@ -114,6 +116,9 @@ const deps = {
   withTimeout,
   startLagMonitor,
   watchOutboundFreeze,
+  /** Fast `node:crypto` stamp engine install/reset (@reticulum 0.9.9). */
+  useNodeStamper,
+  stopNodeStamper,
 };
 
 /**
@@ -534,6 +539,30 @@ module.exports = (app) => {
       plugin.lxmf = undefined;
       plugin.nomadnet = undefined;
       plugin.rfed = undefined;
+
+      // Install the fast `node:crypto` stamp engine (@reticulum 0.9.9, work
+      // doc #45) before any LXMF/rfed node boots. The swap is process-global
+      // in @reticulum/core, so one install covers outbound LXMF stamp
+      // generation, propagation blob/peering validation and rfed channel
+      // stamps — replacing the WebCrypto default whose full-block re-hashing
+      // made stamp generation and inbound validation dominate CPU on busy
+      // nodes. The engine runs workblock builds and stamp generation in a
+      // worker thread, so stamping never blocks the Signal K event loop.
+      // Best-effort: a failure here leaves the byte-identical WebCrypto
+      // default in place rather than failing plugin start. The cleanup runs
+      // on stop (also covering config-change restarts, where the engine is
+      // simply re-installed by the next start).
+      try {
+        deps.useNodeStamper();
+        app.debug(
+          "Installed fast node:crypto stamper for LXMF/rfed proof-of-work",
+        );
+      } catch (e) {
+        app.debug(
+          `Fast stamper install failed, keeping WebCrypto default: ${e.message}`,
+        );
+      }
+      unsubscribes.push(() => deps.stopNodeStamper());
 
       let resolved;
       try {
