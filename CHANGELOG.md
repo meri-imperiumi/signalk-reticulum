@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.8.3] - 2026-10-18
 ### Changed
 - **Updates `@reticulum/*` to 0.9.12, which kills the expired-link memory leaks behind the 2026-10-17 lille-oe OOM.** Handshake-phase links now expire (Python `Link.establishment_timeout` parity) instead of staying registered in `activeLinks` forever when an establishment never completes, leaking the link and its ephemeral key material under sustained propagation traffic with unreachable peers; and a link's in-flight resource transfers are cancelled and released when the link closes, so torn-down links are no longer retained by their own sender/receiver resource registries together with the transfer buffers — the advertised oversized `/offer` payload and accumulated received parts that compounded into multi-GB heap growth during sync-failure storms. The new `communication.reticulum.*` registry counters and heap gauge below are the observability for exactly these leaks, and should now return to zero when links close
 ### Fixed
