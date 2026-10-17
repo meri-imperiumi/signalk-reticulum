@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.8.2] - 2026-10-17
 ### Fixed
 - **Link teardown during an in-flight sync request no longer crashes the Signal K server.** Updates `@reticulum/*` to 0.9.11, whose crasher-fix round covers the cases 0.9.10's transmit-failure fix left open: link teardown (or the response timeout) while a request transmit is still in flight no longer rejects the pending response promise nobody yet holds (`Link closed before RESPONSE arrived` from stale-link teardown, work doc #46); `Link.teardown()` is now best-effort so fire-and-forget teardowns of dead links can't become unhandled rejections; failures in the transport's ingress pipeline and 5 s maintenance sweep are caught and logged instead of escaping; and the WebSocket interface drops KISS frames arriving after an inbound-stream error instead of throwing
 
