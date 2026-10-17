@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.8.1] - 2026-10-17
 ### Fixed
 - **Propagation peer syncs no longer crash the whole Signal K server.** Updates `@reticulum/*` to 0.9.10, which fixes an orphaned REQUEST timeout in `Link.request()`: when a request's transmit failed (e.g. `Link ... is not available` because the link dropped between establishment and the `/offer` REQUEST during propagation peer sync), the pending-entry timeout timer kept running and later rejected the never-returned response promise as an unhandled rejection, which under Node's default `--unhandled-rejections=throw` terminated the server process (reticulum-js work doc #46)
 
