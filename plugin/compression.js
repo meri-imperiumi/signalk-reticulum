@@ -94,19 +94,30 @@ function defuseHandlersAddedSince(snap) {
  * the loaded class without re-requiring (the real module can only install
  * its handlers once, at first evaluation).
  *
+ * The glue installs its handlers at the *start* of module evaluation and can
+ * still abort afterwards (e.g. the upstream Windows packaging bug that builds
+ * a doubled-drive-letter `.wasm` path like `D:\D:\a\…` and fails the binary
+ * fetch with `Aborted(ENOENT …)`), so a failed `require()` must still defuse
+ * before rethrowing — otherwise the landmine stays armed in the host process.
+ *
  * @returns {new () => import("@digitaldefiance/bzip2-wasm").default}
  */
 function loadBZip2() {
   if (deps.BZip2) return deps.BZip2;
   const snap = snapshotHandlers();
-  deps.BZip2 = require("@digitaldefiance/bzip2-wasm").default;
-  const removed = defuseHandlersAddedSince(snap);
-  if (removed > 0) {
-    log(
-      `Defused ${removed} process-global handler(s) installed by the ` +
-        "bzip2 WASM glue (uncaughtException/unhandledRejection rethrow)",
-    );
+  let Impl;
+  try {
+    Impl = require("@digitaldefiance/bzip2-wasm").default;
+  } finally {
+    const removed = defuseHandlersAddedSince(snap);
+    if (removed > 0) {
+      log(
+        `Defused ${removed} process-global handler(s) installed by the ` +
+          "bzip2 WASM glue (uncaughtException/unhandledRejection rethrow)",
+      );
+    }
   }
+  deps.BZip2 = Impl;
   return deps.BZip2;
 }
 
@@ -142,33 +153,47 @@ async function createBz2Provider(logFn = () => {}) {
   if (typeof logFn === "function") log = logFn;
   const Impl = loadBZip2();
   const snap = snapshotHandlers();
-  const impl = new Impl();
-  await impl.init();
-  const removed = defuseHandlersAddedSince(snap);
-  if (removed > 0) {
-    log(
-      `Defused ${removed} process-global handler(s) installed during ` +
-        "bzip2 WASM init",
-    );
+  try {
+    const impl = new Impl();
+    await impl.init();
+    const removed = defuseHandlersAddedSince(snap);
+    if (removed > 0) {
+      log(
+        `Defused ${removed} process-global handler(s) installed during ` +
+          "bzip2 WASM init",
+      );
+    }
+    log("bzip2 compression provider ready");
+    return {
+      /**
+       * @param {Uint8Array} data
+       * @returns {Uint8Array}
+       */
+      compress(data) {
+        return impl.compress(data, BLOCK_SIZE, compressBufferSize(data.length));
+      },
+      /**
+       * @param {Uint8Array} data
+       * @param {number} size
+       * @returns {Uint8Array}
+       */
+      decompress(data, size) {
+        return impl.decompress(data, size);
+      },
+    };
+  } catch (err) {
+    // Same reasoning as in loadBZip2: the glue may have installed its
+    // process-global handlers before init() failed (e.g. the upstream
+    // Windows `.wasm` path bug), and the host's own handling must survive.
+    const removed = defuseHandlersAddedSince(snap);
+    if (removed > 0) {
+      log(
+        `Defused ${removed} process-global handler(s) left behind by a ` +
+          "failed bzip2 WASM init",
+      );
+    }
+    throw err;
   }
-  log("bzip2 compression provider ready");
-  return {
-    /**
-     * @param {Uint8Array} data
-     * @returns {Uint8Array}
-     */
-    compress(data) {
-      return impl.compress(data, BLOCK_SIZE, compressBufferSize(data.length));
-    },
-    /**
-     * @param {Uint8Array} data
-     * @param {number} size
-     * @returns {Uint8Array}
-     */
-    decompress(data, size) {
-      return impl.decompress(data, size);
-    },
-  };
 }
 
 module.exports = {
