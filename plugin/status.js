@@ -100,7 +100,7 @@ function getInterfaceStats(iface) {
  *   configured or auto-discovered *external* LXMF propagation node this
  *   plugin uses as a store-and-forward client (null when none/unknown);
  *   only surfaced when no embedded propagation node is running
- * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], interfacesFailed: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
+ * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], interfacesFailed: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, resourcesOutgoing: number, resourcesIncoming: number, pendingRequests: number, pendingLinkProofs: number, splitResources: number, failedSplitResources: number, heapUsedBytes: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
  */
 async function getStatus(
   rns,
@@ -154,6 +154,34 @@ async function getStatus(
   // These are ephemeral and exist only during active exchanges
   if (rns?.transport?.activeLinks) {
     links = rns.transport.activeLinks.size;
+  }
+
+  // Memory-pressure observability: per-link registry sizes summed across all
+  // active links, plus the process heap size. A resource/transfer leak shows
+  // up as these growing while `links` itself stays flat — exactly the
+  // signature of the 2026-10-17 lille-oe OOM, where torn-down links were
+  // retained by their own resource registries during a sync-failure storm.
+  let resourcesOutgoing = 0;
+  let resourcesIncoming = 0;
+  let pendingRequests = 0;
+  let pendingLinkProofs = 0;
+  let splitResources = 0;
+  let failedSplitResources = 0;
+  if (rns?.transport?.activeLinks) {
+    for (const link of rns.transport.activeLinks.values()) {
+      resourcesOutgoing += link.outgoingResources?.size ?? 0;
+      resourcesIncoming += link.incomingResources?.size ?? 0;
+      pendingRequests += link.pendingRequests?.size ?? 0;
+      pendingLinkProofs += link._pendingLinkProofs?.size ?? 0;
+      splitResources += link.splitResources?.size ?? 0;
+      failedSplitResources += link.failedSplitResources?.size ?? 0;
+    }
+  }
+  let heapUsedBytes = 0;
+  try {
+    heapUsedBytes = process.memoryUsage().heapUsed;
+  } catch (_e) {
+    // Non-Node runtimes without process.memoryUsage: report 0.
   }
 
   let destinationsKnown = 0;
@@ -214,6 +242,13 @@ async function getStatus(
     interfacesConnected,
     bytesReceived,
     bytesTransmitted,
+    resourcesOutgoing,
+    resourcesIncoming,
+    pendingRequests,
+    pendingLinkProofs,
+    splitResources,
+    failedSplitResources,
+    heapUsedBytes,
     lxmfPropagationNode: propagationNodeHash ?? clientPropagationNode ?? null,
     rfedNode: rfedNodeHash,
     embeddedPropagationRunning,
@@ -294,6 +329,34 @@ async function formatStatusValues(
     {
       path: "communication.reticulum.destinationsKnown",
       value: status.destinationsKnown,
+    },
+    {
+      path: "communication.reticulum.resourcesOutgoing",
+      value: status.resourcesOutgoing,
+    },
+    {
+      path: "communication.reticulum.resourcesIncoming",
+      value: status.resourcesIncoming,
+    },
+    {
+      path: "communication.reticulum.pendingRequests",
+      value: status.pendingRequests,
+    },
+    {
+      path: "communication.reticulum.pendingLinkProofs",
+      value: status.pendingLinkProofs,
+    },
+    {
+      path: "communication.reticulum.splitResources",
+      value: status.splitResources,
+    },
+    {
+      path: "communication.reticulum.failedSplitResources",
+      value: status.failedSplitResources,
+    },
+    {
+      path: "communication.reticulum.heapUsed",
+      value: status.heapUsedBytes,
     },
 
     {
@@ -484,6 +547,69 @@ function getStatusMetadata() {
         description:
           "Number of remote destinations in the routing table (peers reachable via announces)",
         units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.resourcesOutgoing",
+      value: {
+        displayName: "Outgoing resource transfers",
+        description:
+          "In-flight outgoing Resource transfers registered across active links. Growth while `links` stays flat indicates a transfer leak",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.resourcesIncoming",
+      value: {
+        displayName: "Incoming resource transfers",
+        description:
+          "In-flight incoming Resource transfers registered across active links. Growth while `links` stays flat indicates a stalled transfer leak",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.pendingRequests",
+      value: {
+        displayName: "Pending REQUESTs",
+        description:
+          "REQUEST/RESPONSE round-trips awaiting their responses across active links",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.pendingLinkProofs",
+      value: {
+        displayName: "Pending link proofs",
+        description:
+          "Sent CTX_NONE link DATA packets awaiting their PROOF across active links",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.splitResources",
+      value: {
+        displayName: "Split resources in progress",
+        description:
+          "Multi-segment Resource transfers being assembled, keyed by first segment hash",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.failedSplitResources",
+      value: {
+        displayName: "Failed split resources",
+        description:
+          "Transfer hashes rejected after a failed split transfer; grows monotonically per failed multi-segment transfer",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.heapUsed",
+      value: {
+        displayName: "Node heap used",
+        description:
+          "V8 heap in use by the host process — the direct signal for memory exhaustion",
+        units: "bytes",
       },
     },
 

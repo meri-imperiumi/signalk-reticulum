@@ -5,7 +5,6 @@ const assert = require("node:assert/strict");
 const {
   sanitizePathSegment,
   getInterfaceStats,
-  getStatus,
   formatStatusValues,
   getStatusMetadata,
 } = require("../plugin/status.js");
@@ -614,4 +613,59 @@ test("per-interface ingress-control counters are published when the interface re
   );
   const loraEntry = interfaces.value.find((i) => i.id === "lora_node");
   assert.equal(loraEntry.ingressControl, undefined);
+});
+
+test("status publishes per-link registry sizes and process heap for leak observability", async () => {
+  // A fake transport with one active link carrying populated registries —
+  // the shape of a leak: registry sizes grow while `links` stays flat.
+  const link = {
+    outgoingResources: new Map([["a", {}]]),
+    incomingResources: new Map([
+      ["b", {}],
+      ["c", {}],
+    ]),
+    pendingRequests: new Map([["d", {}]]),
+    _pendingLinkProofs: new Map([["e", {}]]),
+    splitResources: new Map([["f", {}]]),
+    failedSplitResources: new Set(["g"]),
+  };
+  const rns = {
+    transport: {
+      interfaces: [],
+      activeLinks: new Map([["linkhash", link]]),
+      routingTable: { routes: new Map() },
+    },
+  };
+
+  const values = await formatStatusValues(rns, null, null, null);
+  const find = (path) => values.find((v) => v.path === path);
+
+  assert.equal(find("communication.reticulum.links").value, 1);
+  assert.equal(find("communication.reticulum.resourcesOutgoing").value, 1);
+  assert.equal(find("communication.reticulum.resourcesIncoming").value, 2);
+  assert.equal(find("communication.reticulum.pendingRequests").value, 1);
+  assert.equal(find("communication.reticulum.pendingLinkProofs").value, 1);
+  assert.equal(find("communication.reticulum.splitResources").value, 1);
+  assert.equal(find("communication.reticulum.failedSplitResources").value, 1);
+
+  const heap = find("communication.reticulum.heapUsed");
+  assert.ok(heap, "heapUsed value missing");
+  assert.ok(
+    typeof heap.value === "number" && heap.value > 0,
+    `heapUsed should be a positive byte count, got ${heap.value}`,
+  );
+
+  const metadata = getStatusMetadata();
+  const metaPaths = metadata.map((m) => m.path);
+  for (const path of [
+    "communication.reticulum.resourcesOutgoing",
+    "communication.reticulum.resourcesIncoming",
+    "communication.reticulum.pendingRequests",
+    "communication.reticulum.pendingLinkProofs",
+    "communication.reticulum.splitResources",
+    "communication.reticulum.failedSplitResources",
+    "communication.reticulum.heapUsed",
+  ]) {
+    assert.ok(metaPaths.includes(path), `metadata for ${path} missing`);
+  }
 });

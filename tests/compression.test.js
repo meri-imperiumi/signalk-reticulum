@@ -6,6 +6,9 @@ const {
   createBz2Provider,
   compressBufferSize,
   BLOCK_SIZE,
+  GUARD_EVENTS,
+  snapshotHandlers,
+  defuseHandlersAddedSince,
 } = require("../plugin/compression");
 
 const REAL_BZIP2 = deps.BZip2;
@@ -103,4 +106,81 @@ test("createBz2Provider uses the injected BZip2, not the real module", async () 
   await assert.rejects(() => createBz2Provider(), /wasm boom/);
 
   deps.BZip2 = REAL_BZIP2;
+});
+
+// ---------------------------------------------------------------------------
+// Emscripten process-global handler defusal
+//
+// The generated WASM glue installs `process.on('uncaughtException')` and
+// `process.on('unhandledRejection')` rethrow handlers at module-evaluation
+// time. The unhandledRejection one converts every orphaned rejection in the
+// host process — from any plugin — into a thrown, process-killing exception
+// (observed 2026-10-17: a shelly2 `connect ECONNRESET` orphan surfaced
+// through `bzip2.mjs:168 throw ex` and killed signalk-server). The loader
+// must remove exactly the handlers the glue added.
+// ---------------------------------------------------------------------------
+
+test("defuseHandlersAddedSince removes only listeners added after the snapshot", () => {
+  const event = "unhandledRejection";
+  const probe = () => {};
+  const landmine = () => {
+    throw new Error("emscripten rethrow");
+  };
+  process.on(event, probe);
+  const snap = snapshotHandlers();
+  process.on(event, landmine);
+
+  const removed = defuseHandlersAddedSince(snap);
+
+  assert.equal(removed, 1);
+  assert.ok(
+    process.listeners(event).includes(probe),
+    "host listeners must survive",
+  );
+  assert.ok(
+    !process.listeners(event).includes(landmine),
+    "glue-installed handlers must be removed",
+  );
+  process.removeListener(event, probe);
+});
+
+test("defusing works for uncaughtException too", () => {
+  const event = "uncaughtException";
+  const probe = () => {};
+  const landmine = () => {};
+  process.on(event, probe);
+  const snap = snapshotHandlers();
+  process.on(event, landmine);
+
+  defuseHandlersAddedSince(snap);
+
+  assert.ok(process.listeners(event).includes(probe));
+  assert.ok(!process.listeners(event).includes(landmine));
+  process.removeListener(event, probe);
+});
+
+test("loading the real bzip2 module leaves no net-new process-global handlers", async () => {
+  // Force the lazy loader down the real-module path (tests may have injected
+  // a fake earlier; nulling deps.BZip2 re-triggers the load branch, which is
+  // a no-op when the module was already evaluated).
+  const saved = deps.BZip2;
+  deps.BZip2 = null;
+  const before = snapshotHandlers();
+  try {
+    const provider = await createBz2Provider(() => {});
+    const after = snapshotHandlers();
+    for (const event of GUARD_EVENTS) {
+      assert.ok(
+        after[event].length <= before[event].length,
+        `no net-new ${event} handlers after the bzip2 module load`,
+      );
+    }
+    // The provider still works end-to-end (round-trips through the real WASM).
+    const payload = new TextEncoder().encode("defusal smoke test");
+    const compressed = provider.compress(payload);
+    const decompressed = provider.decompress(compressed, payload.length);
+    assert.deepEqual(Array.from(decompressed), Array.from(payload));
+  } finally {
+    deps.BZip2 = saved;
+  }
 });
