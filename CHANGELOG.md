@@ -1,9 +1,11 @@
 # Changelog
 ## [Unreleased]
+### Fixed
+- **Link teardown during an in-flight sync request no longer crashes the Signal K server.** Updates `@reticulum/*` to 0.9.11, whose crasher-fix round covers the cases 0.9.10's transmit-failure fix left open: link teardown (or the response timeout) while a request transmit is still in flight no longer rejects the pending response promise nobody yet holds (`Link closed before RESPONSE arrived` from stale-link teardown, work doc #46); `Link.teardown()` is now best-effort so fire-and-forget teardowns of dead links can't become unhandled rejections; failures in the transport's ingress pipeline and 5 s maintenance sweep are caught and logged instead of escaping; and the WebSocket interface drops KISS frames arriving after an inbound-stream error instead of throwing
 
 ## [0.8.1] - 2026-10-17
 ### Fixed
-- **Propagation peer syncs no longer crash the whole Signal K server.** Updates `@reticulum/*` to 0.9.10, which fixes an orphaned REQUEST timeout in `Link.request()`: when a request's transmit failed (e.g. `Link ... is not available` because the link dropped between establishment and the `/offer` REQUEST during propagation peer sync), the pending-entry timeout timer kept running and later rejected the never-returned response promise as an unhandled rejection, which under Node's default `--unhandled-rejections=throw` terminated the server process (reticulum-js work doc #46)
+- **Propagation peer syncs no longer crash the whole Signal K server.** Updates `@reticulum/*` to 0.9.10, which fixes an orphaned REQUEST timeout in `Link.request()`: when a request's transmit failed (`Link ... is not available` because the link dropped between establishment and the `/offer` REQUEST during propagation peer sync), the pending-entry timeout timer kept running and later rejected the never-returned response promise as an unhandled rejection, which under Node's default `--unhandled-rejections=throw` terminated the server process (reticulum-js work doc #46). The same 0.9.10 release fixes equivalent unhandled-rejection leaks in `WebRTCSignaling.connect()` and `Link.send()` pending-proof entries
 
 ## [0.8.0] - 2026-10-17
 ### Changed
