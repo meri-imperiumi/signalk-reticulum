@@ -39,10 +39,10 @@
   },
   "dependencies": {
     "@digitaldefiance/bzip2-wasm": "^1.1.1",
-    "@reticulum/core": "^0.9.9",
-    "@reticulum/lxmf": "^0.9.9",
-    "@reticulum/node": "^0.9.9",
-    "@reticulum/rfed": "^0.9.9"
+    "@reticulum/core": "^0.9.10",
+    "@reticulum/lxmf": "^0.9.10",
+    "@reticulum/node": "^0.9.10",
+    "@reticulum/rfed": "^0.9.10"
   },
   "devDependencies": {
     "@signalk/server-api": "^2.30.0"
