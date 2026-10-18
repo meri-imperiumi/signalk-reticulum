@@ -15,6 +15,7 @@
 
 const RNS = require("@reticulum/core");
 const { RFedNode } = require("@reticulum/rfed");
+const { makeThrottledIngestFilter } = require("./traffic");
 
 // Storage utilities from @reticulum/node, exported top-level since 0.8
 const { loadLXMFStore, saveLXMFStore, loadRFedStores, saveRFedStores } =
@@ -57,6 +58,12 @@ const deps = {
  *   the `lxmf.propagation` destination at this cadence so cached mesh paths
  *   stay fresh (PROTOCOL-SPEC.md §7.5 / §9.7); 0/absent keeps the single
  *   announce done at start.
+ * @param {object} [options.traffic] - Metered-internet traffic policy (see
+ *   `traffic.js`). When `throttleThirdParty` is set, the node installs the
+ *   `ingestFilter` gate from the start: mirrored 3rd-party traffic (offer-
+ *   born peer-sync copies not addressed to the boat or its crew nodes) is
+ *   dropped — the metered throttle is applied from the very start when the
+ *   plugin boots on an already-metered connection.
  * @param {(...args:any[])=>void} options.log - Logger function
  * @returns {Promise<{node: object|null, teardown: ()=>void}>}
  */
@@ -65,6 +72,7 @@ async function setupEmbeddedPropagationNode({
   config,
   dataDir,
   announceIntervalMs,
+  traffic,
   log = () => {},
 }) {
   const propConfig = config?.embedded_nodes?.propagation || {};
@@ -113,6 +121,13 @@ async function setupEmbeddedPropagationNode({
   }
 
   try {
+    // Metered-internet throttle (traffic.js): when the connection is metered
+    // and throttling is enabled, mirrored 3rd-party traffic is dropped from
+    // the start — only blobs addressed to known-boat lxmf.delivery
+    // destinations are stored. The hook is read dynamically per request, so
+    // a later boundary flip can also swap it in place without restarting
+    // the node.
+    const throttled = !!(traffic && traffic.throttleThirdParty);
     const propagationNode = await lxmf.enablePropagation({
       stampCost,
       name: propConfig.name || config?.messaging?.display_name || undefined,
@@ -120,6 +135,11 @@ async function setupEmbeddedPropagationNode({
       storageLimitBytes,
       messageTtlSecs,
       store,
+      ...(throttled
+        ? {
+            ingestFilter: makeThrottledIngestFilter(traffic.knownHashes || []),
+          }
+        : {}),
     });
 
     if (autopeer) {
@@ -155,7 +175,12 @@ async function setupEmbeddedPropagationNode({
     await lxmf.announcePropagationNode();
     log(
       `Embedded LXMF propagation node started (stamp cost ${stampCost}, ` +
-        `peering cost ${peeringCost}${autopeer ? `, autopeer max cost ${autopeerMaxCost}` : ""})`,
+        `peering cost ${peeringCost}${autopeer ? `, autopeer max cost ${autopeerMaxCost}` : ""})` +
+        (throttled
+          ? `; metered throttle active: mirroring only ${
+              (traffic.knownHashes || []).length
+            } known-boat destinations`
+          : ""),
     );
 
     // Periodically re-announce the lxmf.propagation destination so cached
@@ -261,6 +286,12 @@ async function setupEmbeddedPropagationNode({
  *   `rfed.node` and all the rfed service destinations at this cadence so
  *   cached mesh paths stay fresh (PROTOCOL-SPEC.md §7.5 / §9.7); 0/absent
  *   keeps the single announce done at start.
+ * @param {object} [options.traffic] - Metered-internet traffic policy (see
+ *   `traffic.js`). The current `@reticulum/rfed` release has no per-identity
+ *   publish/subscribe gate (0.9.13's admission control bounds transfer
+ *   abuse but cannot tell boat traffic from 3rd-party traffic), so the
+ *   policy is only logged here; a future reticulum-js release's metered
+ *   levers plug into this option.
  * @param {(...args:any[])=>void} options.log - Logger function
  * @returns {Promise<{node: object|null, teardown: ()=>void}>}
  */
@@ -270,6 +301,7 @@ async function setupEmbeddedRFedNode({
   config,
   dataDir,
   announceIntervalMs,
+  traffic,
   log = () => {},
 }) {
   const rfedConfig = config?.embedded_nodes?.rfed || {};
@@ -373,9 +405,20 @@ async function setupEmbeddedRFedNode({
     });
 
     await node.start();
+    // Metered-internet throttle (traffic.js): the current @reticulum/rfed has
+    // no per-identity publish/subscribe gate (0.9.13's admission control
+    // bounds transfer abuse but cannot tell boat traffic from 3rd-party
+    // traffic), so the policy is only surfaced here — a future
+    // reticulum-js release's metered levers plug into this option (and into
+    // applyMeteredPolicy's flip handler).
+    const throttled = !!(traffic && traffic.throttleThirdParty);
     log(
       `Embedded RFed federation node started ` +
-        `(stamp cost ${stampCost}, flex ${stampFlex})`,
+        `(stamp cost ${stampCost}, flex ${stampFlex})` +
+        (throttled
+          ? "; metered throttle requested but no RFed per-identity lever " +
+            "is available in the current @reticulum/rfed"
+          : ""),
     );
 
     // Periodically re-announce rfed.node and every service destination so

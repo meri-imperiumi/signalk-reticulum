@@ -462,6 +462,18 @@ async function formatStatusValues(
         value: health.interfaceRecycles ?? 0,
       },
     );
+    // Metered-internet traffic throttling (traffic.js). The internet state
+    // itself is already published on vessels.self by the signalk-internet
+    // plugin — only the throttle's engagement (config + network state) is
+    // plugin-internal and published here. Absent until the throttle state is
+    // known so a server without the signalk-internet plugin publishes
+    // nothing.
+    if (typeof health.meteredThrottle === "boolean") {
+      values.push({
+        path: "communication.reticulum.meteredThrottle",
+        value: health.meteredThrottle,
+      });
+    }
   }
 
   // Add embedded nodes status
@@ -734,6 +746,17 @@ function getStatusMetadata() {
           "Interfaces rebuilt this run to recover a wedged transmit path " +
           "(the in-process equivalent of a server restart)",
         units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.meteredThrottle",
+      value: {
+        displayName: "Metered traffic throttle",
+        description:
+          "Whether 3rd-party mesh traffic is currently throttled because " +
+          "the internet connection is metered (network.internet.state; see " +
+          "that path for the state itself; only with the throttle setting " +
+          "enabled)",
       },
     },
   ];

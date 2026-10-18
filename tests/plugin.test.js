@@ -19,6 +19,7 @@ const fallback = require("../plugin/commands/fallback");
 const compression = require("../plugin/compression");
 const rfed = require("../plugin/rfed");
 const embeddedNodes = require("../plugin/embedded-nodes");
+const traffic = require("../plugin/traffic");
 const {
   buildTelemetrySensors,
   packTelemetry,
@@ -246,13 +247,19 @@ class FakeLxmRouter extends EventTarget {
   // lxmf.propagation destination via announcePropagationNode. Recorded so a
   // connectivity-change trigger can be asserted to refresh that destination.
   enablePropagationCalls = [];
-  async enablePropagation(opts) {
+  async enablePropagation(opts = {}) {
     this.enablePropagationCalls.push(opts);
-    return {
+    const node = {
       store: { size: 0 },
       tickMaintenance: () => ({ aged: 0 }),
       stampCost: 8,
+      // Mirror the real router: options land on the node (the metered-
+      // internet throttle installs identityAllowed/ingestFilter here).
+      identityAllowed: opts.identityAllowed ?? (() => true),
+      ingestFilter: opts.ingestFilter ?? null,
     };
+    this.propagationNode = node;
+    return node;
   }
   enableAutopeerCalls = 0;
   enableAutopeer(maxCost) {
@@ -997,10 +1004,8 @@ test("configured connectivity paths replace the default and any of them fires", 
     "both paths share one subscription",
   );
   assert.ok(
-    !subs.some((s) =>
-      s.subscribe.some((sub) => sub.path === "network.internet.state"),
-    ),
-    "the default paths are not watched when paths are configured",
+    !watched.subscribe.some((sub) => sub.path === "network.internet.state"),
+    "the default paths are not watched by the trigger when paths are configured",
   );
 
   const lxmf = plugin.lxmf;
@@ -1030,12 +1035,213 @@ test("an empty connectivity_paths list disables the trigger subscription", async
   });
 
   const subs = app.subscriptionmanager.subscriptions;
-  assert.ok(
-    !subs.some((s) =>
-      s.subscribe.some((sub) => sub.path === "network.internet.state"),
-    ),
-    "no connectivity subscription is set up",
+  // The announce trigger registers nothing when the list is empty, but the
+  // metered-internet tracker still watches the internet state path with its
+  // own, deliberately independent subscription.
+  const internetSubs = subs.filter((s) =>
+    s.subscribe.some((sub) => sub.path === "network.internet.state"),
   );
+  assert.equal(
+    internetSubs.length,
+    1,
+    "only the metered tracker watches the internet state",
+  );
+  assert.equal(
+    internetSubs[0].subscribe.length,
+    1,
+    "the metered subscription is standalone, not the announce trigger",
+  );
+
+  await plugin.stop();
+});
+
+test("a metered internet state throttles the embedded propagation node to known destinations", async () => {
+  // The plugin boots unmetered, then the signalk-internet plugin reports a
+  // metered connection: the embedded propagation node must stop mirroring
+  // 3rd-party traffic (only boat/crew lxmf.delivery destinations mirrored)
+  // — without a restart — and restore the open node when the connection
+  // becomes unmetered again.
+  const realTracker = traffic.createMeteredTracker;
+  // Zero grace so the hysteresis window completes on the next tick.
+  makePlugin.deps.createMeteredTracker = (opts) =>
+    realTracker({ ...opts, graceMs: 0 });
+  try {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    FakeLxmRouter.instances.length = 0;
+    app.getSelfPath = (path) =>
+      path === "network.internet.state" ? "online" : undefined;
+
+    const source = await Identity.generate();
+    await plugin.start({
+      messaging: { display_name: "My Boat" },
+      identity: {
+        privateKey: toHex(await source.getPrivateKey()),
+        publicKey: toHex(await source.getPublicKey()),
+      },
+      crew: [{ name: "Skipper", identity: "b".repeat(32) }],
+      embedded_nodes: { propagation: { enabled: true } },
+    });
+
+    const ownHash = toHex(plugin.identity.identityHash);
+    const node = plugin.lxmf.propagationNode;
+    const strangerIdentity = {
+      identityHash: Buffer.from("e".repeat(32), "hex"),
+    };
+    assert.equal(
+      node.identityAllowed(strangerIdentity),
+      true,
+      "identityAllowed gate left open (crew messages flow in from peers)",
+    );
+    assert.equal(
+      node.ingestFilter,
+      null,
+      "no mirrored-traffic filter while unmetered",
+    );
+
+    app._onDelta({
+      updates: [
+        { values: [{ path: "network.internet.state", value: "metered" }] },
+      ],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Mirrored-traffic ingest filter armed: only boat/crew delivery
+    // destinations are mirrored, 3rd-party traffic dropped.
+    const ingestFilter = node.ingestFilter;
+    assert.equal(
+      ingestFilter({
+        destinationHash: Buffer.from(deriveLxmfDestinationHash(ownHash), "hex"),
+      }),
+      true,
+      "own delivery mirrored",
+    );
+    assert.equal(
+      ingestFilter({
+        destinationHash: Buffer.from(
+          deriveLxmfDestinationHash("b".repeat(32)),
+          "hex",
+        ),
+      }),
+      true,
+      "crew delivery mirrored",
+    );
+    assert.equal(
+      ingestFilter({ destinationHash: Buffer.from("e".repeat(32), "hex") }),
+      false,
+      "3rd-party mirrored traffic dropped",
+    );
+    // The identityAllowed gate is deliberately left open (strangers can
+    // still retrieve; only mirroring is throttled).
+    assert.equal(
+      node.identityAllowed(strangerIdentity),
+      true,
+      "identityAllowed gate left open when metered",
+    );
+
+    app._onDelta({
+      updates: [
+        { values: [{ path: "network.internet.state", value: "online" }] },
+      ],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      node.ingestFilter,
+      null,
+      "mirrored-traffic filter removed once unmetered",
+    );
+
+    await plugin.stop();
+  } finally {
+    makePlugin.deps.createMeteredTracker = realTracker;
+  }
+});
+
+test("throttle_third_party_metered: false keeps the node open when metered", async () => {
+  const realTracker = traffic.createMeteredTracker;
+  makePlugin.deps.createMeteredTracker = (opts) =>
+    realTracker({ ...opts, graceMs: 0 });
+  try {
+    const app = makeApp();
+    const plugin = makePlugin(app);
+    FakeLxmRouter.instances.length = 0;
+    app.getSelfPath = (path) =>
+      path === "network.internet.state" ? "metered" : undefined;
+
+    const source = await Identity.generate();
+    await plugin.start({
+      messaging: { display_name: "My Boat" },
+      identity: {
+        privateKey: toHex(await source.getPrivateKey()),
+        publicKey: toHex(await source.getPublicKey()),
+      },
+      traffic_limits: { throttle_third_party_metered: false },
+      embedded_nodes: { propagation: { enabled: true } },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const node = plugin.lxmf.propagationNode;
+    assert.equal(
+      node.identityAllowed({
+        identityHash: Buffer.from("e".repeat(32), "hex"),
+      }),
+      true,
+      "setting disabled: identityAllowed gate stays open",
+    );
+    assert.equal(
+      node.ingestFilter,
+      null,
+      "setting disabled: everyone still mirrored while metered",
+    );
+
+    await plugin.stop();
+  } finally {
+    makePlugin.deps.createMeteredTracker = realTracker;
+  }
+});
+
+test("booting on an already-metered connection starts the node throttled", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  FakeLxmRouter.instances.length = 0;
+  app.getSelfPath = (path) =>
+    path === "network.internet.state" ? "metered" : undefined;
+
+  const source = await Identity.generate();
+  await plugin.start({
+    messaging: { display_name: "My Boat" },
+    identity: {
+      privateKey: toHex(await source.getPrivateKey()),
+      publicKey: toHex(await source.getPublicKey()),
+    },
+    crew: [{ name: "Skipper", identity: "b".repeat(32) }],
+    embedded_nodes: { propagation: { enabled: true } },
+  });
+
+  const node = plugin.lxmf.propagationNode;
+  assert.equal(
+    node.identityAllowed({ identityHash: Buffer.from("e".repeat(32), "hex") }),
+    true,
+    "identityAllowed gate left open at boot",
+  );
+  assert.equal(
+    node.ingestFilter({ destinationHash: Buffer.from("e".repeat(32), "hex") }),
+    false,
+    "3rd-party already throttled at boot",
+  );
+  assert.equal(
+    node.ingestFilter({
+      destinationHash: Buffer.from(
+        deriveLxmfDestinationHash("b".repeat(32)),
+        "hex",
+      ),
+    }),
+    true,
+    "crew still mirrored at boot",
+  );
+  // The gate was handed to enablePropagation at setup.
+  const opts = plugin.lxmf.enablePropagationCalls.at(-1);
+  assert.ok(opts.ingestFilter, "ingestFilter installed at boot");
 
   await plugin.stop();
 });

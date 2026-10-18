@@ -97,6 +97,14 @@ const {
   startLagMonitor,
   watchOutboundFreeze,
 } = require("./recovery");
+const {
+  INTERNET_STATE_PATH,
+  normalizeInternetState,
+  isMeteredState,
+  trafficPolicy,
+  createMeteredTracker,
+  applyMeteredPolicy,
+} = require("./traffic");
 
 /**
  * Overridable dependencies (the Reticulum orchestrator class, the interface
@@ -119,6 +127,9 @@ const deps = {
   /** Fast `node:crypto` stamp engine install/reset (@reticulum 0.9.9). */
   useNodeStamper,
   stopNodeStamper,
+  /** Metered-internet traffic throttling (traffic.js). */
+  createMeteredTracker,
+  applyMeteredPolicy,
 };
 
 /**
@@ -1143,6 +1154,20 @@ module.exports = (app) => {
           typeof app.getDataDirPath === "function"
             ? app.getDataDirPath()
             : null;
+        // Metered-internet traffic policy (traffic.js): the boat's internet
+        // state is read once here so a plugin booting on an already-metered
+        // connection starts throttled; the live tracker below keeps it in
+        // sync as the metered/unmetered boundary flips.
+        const initialInternetState = normalizeInternetState(
+          readSelf(app, INTERNET_STATE_PATH),
+        );
+        const initialMetered = isMeteredState(initialInternetState);
+        if (initialInternetState) {
+          app.debug(`Internet state at start: ${initialInternetState}`);
+        }
+        /** Builds the policy for a metered state against the current config. */
+        const trafficPolicyFor = (metered) =>
+          trafficPolicy(config, metered, hashHex, app.debug);
         const embeddedNodesConfig = config && config.embedded_nodes;
         const embeddedPropagationEnabled =
           embeddedNodesConfig &&
@@ -1160,6 +1185,7 @@ module.exports = (app) => {
               config,
               dataDir: dataDirPath,
               announceIntervalMs,
+              traffic: trafficPolicyFor(initialMetered),
               log: app.debug,
             });
             plugin.embeddedPropagation = embeddedProp.node;
@@ -1193,6 +1219,7 @@ module.exports = (app) => {
               config,
               dataDir: dataDirPath,
               announceIntervalMs,
+              traffic: trafficPolicyFor(initialMetered),
               log: app.debug,
             });
             plugin.embeddedRfed = embeddedRfed.node;
@@ -1314,7 +1341,82 @@ module.exports = (app) => {
           interfaceRecycles: 0,
           /** Whether any monitored interface is currently stalled/probing. */
           outboundStalled: false,
+          /** Whether the metered 3rd-party traffic throttle is active. */
+          meteredThrottle:
+            initialMetered && trafficPolicyFor(true).throttleThirdParty,
         };
+
+        // --- Metered-internet traffic throttling ---------------------------
+        // Watch the unified internet state path: when the metered/unmetered
+        // boundary flips (and the throttle setting is enabled), apply the
+        // traffic policy to the live embedded nodes. The tracker debounces
+        // the flip behind a hysteresis window so a flapping connection never
+        // churns the throttling mode. The lever is the embedded propagation
+        // node's `ingestFilter` (dropping mirrored 3rd-party traffic while
+        // crew-addressed messages keep flowing in from peers; direct
+        // submissions are always kept — reticulum-js work doc #47); the
+        // next reticulum-js release's RFed levers plug into the same hook.
+        // The tracker's own state is the source of truth; the throttle is
+        // engaged only when the connection is metered AND the setting is on.
+        const throttleSettingOn = () =>
+          trafficPolicyFor(true).throttleThirdParty;
+        const meteredTracker = deps.createMeteredTracker({
+          onChange: (metered) => {
+            // The tracker state is already the committed one when onChange
+            // fires, so the flag can be derived straight from the flip.
+            pluginHealth.meteredThrottle = metered && throttleSettingOn();
+            if (!throttleSettingOn()) {
+              // Throttling disabled in config: nothing to apply on flips
+              // (in either direction — the nodes just stay open).
+              app.debug(
+                `Internet ${metered ? "metered" : "unmetered"}; 3rd-party traffic throttling is disabled in config`,
+              );
+              return;
+            }
+            deps.applyMeteredPolicy({
+              lxmf: plugin.lxmf,
+              rfed: plugin.embeddedRfed,
+              policy: trafficPolicyFor(metered),
+              log: (msg) => app.debug(msg),
+            });
+          },
+        });
+        // Initialise from the state read at start (no synthetic flip).
+        meteredTracker.observe(readSelf(app, INTERNET_STATE_PATH));
+        // Cancel a pending grace-window transition on teardown so a flip
+        // observed just before stop neither fires into the torn-down plugin
+        // nor keeps the event loop alive past shutdown.
+        unsubscribes.push(() => meteredTracker.dispose());
+        if (app.subscriptionmanager) {
+          try {
+            app.subscriptionmanager.subscribe(
+              {
+                context: "vessels.self",
+                subscribe: [{ path: INTERNET_STATE_PATH, policy: "instant" }],
+              },
+              unsubscribes,
+              (err) => app.debug(`Metered-state subscription error: ${err}`),
+              (delta) => {
+                if (!delta || !delta.updates) {
+                  return;
+                }
+                for (const update of delta.updates) {
+                  if (!update.values) {
+                    continue;
+                  }
+                  for (const v of update.values) {
+                    if (!v || v.path !== INTERNET_STATE_PATH) {
+                      continue;
+                    }
+                    meteredTracker.observe(v.value);
+                  }
+                }
+              },
+            );
+          } catch (e) {
+            app.debug(`Metered-state subscription error: ${e.message}`);
+          }
+        }
 
         // Publish Reticulum status metadata on startup.
         const statusMetadata = getStatusMetadata();

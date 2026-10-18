@@ -424,6 +424,71 @@ test("per-interface ids are unique when names collide after sanitization", async
 
 // --- lxmfPropagationNode: embedded vs external (client) node ----------------
 
+// --- metered-internet traffic throttle surfacing ----------------------------
+
+test("formatStatusValues publishes meteredThrottle from the health snapshot", async () => {
+  // The internet state itself is published by the signalk-internet plugin on
+  // network.internet.state — only the throttle's engagement (config +
+  // network state) is plugin-internal. Absent until known.
+  const engaged = await formatStatusValues(
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    {
+      meteredThrottle: true,
+    },
+  );
+  const throttled = engaged.find(
+    (v) => v.path === "communication.reticulum.meteredThrottle",
+  );
+  assert.ok(throttled, "engaged throttle published");
+  assert.equal(throttled.value, true);
+
+  const off = await formatStatusValues(
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    {
+      meteredThrottle: false,
+    },
+  );
+  const unthrottled = off.find(
+    (v) => v.path === "communication.reticulum.meteredThrottle",
+  );
+  assert.equal(unthrottled.value, false);
+
+  // No health snapshot (or no throttle state) publishes nothing.
+  const bare = await formatStatusValues(null, null, null, null);
+  assert.ok(
+    !bare.some((v) => v.path === "communication.reticulum.meteredThrottle"),
+  );
+  const noState = await formatStatusValues(
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    {},
+  );
+  assert.ok(
+    !noState.some((v) => v.path === "communication.reticulum.meteredThrottle"),
+    "unknown throttle state publishes nothing",
+  );
+});
+
 test("lxmfPropagationNode reports the external client node when no embedded node runs", async () => {
   const externalHex = "0123456789abcdef0123456789abcdef";
   const values = await formatStatusValues(

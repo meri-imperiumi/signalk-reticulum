@@ -205,6 +205,58 @@ function buildPluginSchema(interfaces) {
         },
         additionalProperties: false,
       },
+      traffic_limits: {
+        type: "object",
+        title: "Traffic limits",
+        description:
+          "Limit mesh traffic relaying when the boat's internet uplink is " +
+          "metered (pay-per-GB Starlink, capped LTE). The embedded LXMF " +
+          "propagation node and RFed federation node otherwise serve every " +
+          "mesh client unconditionally; on a metered connection relaying " +
+          "3rd-party propagation traffic through the boat costs real " +
+          "bandwidth. Traffic from the boat itself and its crew nodes is " +
+          "never throttled — those are recognised automatically from the " +
+          "crew configuration — and additional known boat destination " +
+          "hashes can be listed below.",
+        properties: {
+          throttle_third_party_metered: {
+            type: "boolean",
+            title: "Throttle 3rd-party mesh traffic on metered internet",
+            description:
+              "When the internet connection is metered (network.internet." +
+              "state is 'metered'), the embedded propagation node stops " +
+              "mirroring 3rd-party traffic: messages relayed to it by " +
+              "peering propagation nodes are stored only when addressed to " +
+              "the boat itself or its crew nodes — everything else is " +
+              "dropped. Messages submitted directly to the node are always " +
+              "kept (the node is their custodian), so crew messaging keeps " +
+              "working, and the change applies without a restart when the " +
+              "metered/unmetered boundary is crossed. On by default; " +
+              "disable to always mirror everything.",
+            default: true,
+          },
+          known_nodes: {
+            type: "array",
+            title: "Known boat destination hashes",
+            description:
+              "Additional LXMF destination hashes that count as the boat's " +
+              "own traffic when throttling is active. The boat itself and " +
+              "the crew nodes configured above are always recognised " +
+              "automatically — list any other boat-associated nodes (e.g. a " +
+              "second boat-side node not in the crew list) by their " +
+              "32-character hexadecimal hash.",
+            default: [],
+            items: {
+              type: "string",
+              title: "Destination hash",
+              pattern: "^[0-9a-fA-F]{32}$",
+              minLength: 32,
+              maxLength: 32,
+            },
+          },
+        },
+        additionalProperties: false,
+      },
       identity: {
         type: "object",
         title: "Identity",
@@ -898,6 +950,7 @@ function buildPluginSchema(interfaces) {
  */
 const ADVANCED_GROUPS = [
   "announce",
+  "traffic_limits",
   "propagation",
   "nomadnet",
   "telemetry",

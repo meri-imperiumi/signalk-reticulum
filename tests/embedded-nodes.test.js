@@ -131,6 +131,89 @@ test("embedded propagation enabled by default when config missing", async () => 
   assert.ok(logs.some((l) => l.includes("propagation")));
 });
 
+test("embedded propagation installs the metered throttle gate when the policy throttles", async () => {
+  const logs = [];
+  deps.loadLXMFStore = async () => ({ size: 0 });
+  deps.saveLXMFStore = async () => {};
+
+  const lxmf = {
+    enablePropagation: async (opts) => {
+      lxmf.opts = opts;
+      return { store: { size: 0 } };
+    },
+    enableAutopeer: () => {},
+    announcePropagationNode: async () => {},
+  };
+
+  const result = await setupEmbeddedPropagationNode({
+    lxmf,
+    identity: {},
+    config: {},
+    dataDir: null,
+    // Booting on an already-metered connection: the gate installed at
+    // setup, no flip needed.
+    traffic: {
+      metered: true,
+      throttleThirdParty: true,
+      knownHashes: ["b".repeat(32)],
+    },
+    log: (msg) => logs.push(msg),
+  });
+
+  assert.ok(result.node);
+  assert.equal(typeof lxmf.opts.ingestFilter, "function");
+  assert.equal(
+    lxmf.opts.ingestFilter({
+      destinationHash: Buffer.from("b".repeat(32), "hex"),
+    }),
+    true,
+    "known delivery mirrored",
+  );
+  assert.equal(
+    lxmf.opts.ingestFilter({
+      destinationHash: Buffer.from("e".repeat(32), "hex"),
+    }),
+    false,
+    "3rd-party mirrored traffic dropped",
+  );
+  // identityAllowed is deliberately not touched (crew messages flow in
+  // from peers; see traffic.js / work doc #47).
+  assert.equal(lxmf.opts.identityAllowed, undefined);
+  assert.ok(logs.some((l) => l.includes("metered throttle active")));
+});
+
+test("embedded propagation stays open when the traffic policy does not throttle", async () => {
+  const logs = [];
+  deps.loadLXMFStore = async () => ({ size: 0 });
+  deps.saveLXMFStore = async () => {};
+
+  const lxmf = {
+    enablePropagation: async (opts) => {
+      lxmf.opts = opts;
+      return { store: { size: 0 } };
+    },
+    enableAutopeer: () => {},
+    announcePropagationNode: async () => {},
+  };
+
+  const result = await setupEmbeddedPropagationNode({
+    lxmf,
+    identity: {},
+    config: {},
+    dataDir: null,
+    traffic: {
+      metered: false,
+      throttleThirdParty: false,
+      knownHashes: [],
+    },
+    log: (msg) => logs.push(msg),
+  });
+
+  assert.ok(result.node);
+  assert.equal(lxmf.opts.ingestFilter, undefined, "no ingest filter installed");
+  assert.ok(!logs.some((l) => l.includes("metered throttle")));
+});
+
 test("embedded RFed enabled by default when config missing", async () => {
   const logs = [];
   deps.loadRFedStores = async () => ({
