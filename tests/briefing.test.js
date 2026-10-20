@@ -14,6 +14,8 @@ const {
   briefingMarkdown,
   briefingPage,
   fmtUtc,
+  fmtStamp,
+  parseTimezoneOffset,
   fmtAge,
   compass,
   parseUtc,
@@ -96,6 +98,47 @@ function makePayload(overrides = {}) {
         kind: "conjunction",
         timestamp: "2026-10-12T19:30:00Z",
         description: "Venus and Jupiter in conjunction: 0.5° apart",
+      },
+    ],
+    departure: {
+      assumed: true,
+      time: "2026-10-12T09:00:00.000Z",
+      reason: "next_dawn",
+    },
+    capAlerts: [
+      {
+        id: "cap-1",
+        severity: "extreme",
+        event: "Tsunami Warning",
+        headline: "Tsunami warning for coastal areas",
+        expires: "2026-10-13T06:00:00.000Z",
+        instruction: "Move vessels to deep water",
+      },
+    ],
+    fronts: {
+      schema: "fronts/v2",
+      caveat: "An automatic analysis",
+      passages: [
+        {
+          time: "2026-10-13T06:00:00.000Z",
+          kind: "cold",
+          trackId: 1,
+          lat: 60.0,
+          lon: 21.0,
+          shiftDeg: 40.4,
+          motionDeg: 90,
+          speedKn: 25,
+        },
+      ],
+    },
+    zoneTransitions: [
+      {
+        kind: "leave",
+        territory: { name: "Finland", iso_ter: "FI" },
+        lat: 60.0,
+        lon: 21.0,
+        distanceFromStartNm: 214.3,
+        connectivity: "ocean",
       },
     ],
     ...overrides,
@@ -281,16 +324,58 @@ test("briefMeta reads the summary meta off the bus", () => {
         "navigation.briefing.stale": false,
       }),
     ),
-    { route: "Balticcircle", comfort: "easy", stale: false },
+    {
+      route: "Balticcircle",
+      comfort: "easy",
+      stale: false,
+      timeOffset: undefined,
+    },
   );
   assert.deepEqual(briefMeta(null), {
     route: undefined,
     comfort: undefined,
     stale: undefined,
+    timeOffset: undefined,
   });
 });
 
 // --- the shared body lines ---------------------------------------------------
+
+test("parseTimezoneOffset parses the Signal K (-)hhmm encoding", () => {
+  assert.equal(parseTimezoneOffset(200), 120);
+  assert.equal(parseTimezoneOffset("-930"), -570);
+  assert.equal(parseTimezoneOffset(0), 0);
+  assert.equal(parseTimezoneOffset(-330), -210);
+  assert.equal(parseTimezoneOffset(165), null);
+  assert.equal(parseTimezoneOffset(2400), null);
+  assert.equal(parseTimezoneOffset("abc"), null);
+  assert.equal(parseTimezoneOffset(null), null);
+  assert.equal(parseTimezoneOffset(undefined), null);
+});
+
+test("fmtStamp renders ship's time without a suffix, UTC with Z", () => {
+  assert.equal(fmtStamp("2026-10-12T08:05:00.000Z", null), "10-12 08:05Z");
+  assert.equal(fmtStamp("2026-10-12T08:05:00.000Z", 120), "10-12 10:05");
+  assert.equal(fmtStamp("2026-10-12T08:05:00.000Z", -570), "10-11 22:35");
+  assert.equal(fmtStamp("not a date", 120), "");
+});
+
+test("briefingLines renders the times in ship's time when the bus carries it", () => {
+  const lines = briefingLines({
+    payload: makePayload(),
+    meta: { timeOffset: 300 },
+    now: NOW,
+  });
+  // Compiled 08:00Z = 11:00 ship time (offset `300` = UTC+3); every stamp
+  // shifts, no suffix
+  assert.equal(lines[0], "Compiled 10-12 11:00, 30m old");
+  assert.ok(lines.includes("Surplus 2.1 kWh until 10-12 17:00"));
+  assert.ok(lines.includes("☀ Sun: 10-12 22:04↓, 10-13 08:31↑"));
+  assert.ok(lines.includes("☽ Moon: 10-13 01:31↑, 10-13 09:12↓, 40% lit"));
+  assert.ok(
+    lines.includes("10-12 22:30 Venus and Jupiter in conjunction: 0.5° apart"),
+  );
+});
 
 test("briefingLines renders the full briefing body", () => {
   assert.deepEqual(
@@ -298,6 +383,7 @@ test("briefingLines renders the full briefing body", () => {
     [
       "Compiled 10-12 08:00Z, 30m old",
       "Conditions here, next 24h",
+      "⚓ Departure: First light 10-12 09:00Z",
       "Comfort: easy",
       "Wind: 12-18 kn from WSW, gusts to 24 kn",
       "Waves: max 1.4 m at 7 s",
@@ -305,10 +391,18 @@ test("briefingLines renders the full briefing body", () => {
       "Cloud cover: up to 90 %",
       "Warnings:",
       "GALE WARNING. Winds 30 to 40 kn.",
+      "🚨 Alerts:",
+      "EXTREME Tsunami Warning — Tsunami warning for coastal areas — expires 10-13 06:00Z",
+      "Move vessels to deep water",
       "⚠ Hazards:",
       "red Earthquake: M 6.2 nearby (120 nm NE)",
+      "🌬 Fronts:",
+      "Cold front crossing 10-13 06:00Z, wind shift ~40°",
+      "Automatic analysis — official charts are authoritative",
       "🔋 Energy:",
       "Surplus 2.1 kWh until 10-12 14:00Z",
+      "⚑ Waters:",
+      "Leaves Finland waters at 214 nm — ocean beyond",
       "☾ Tonight:",
       "☀ Sun: 10-12 19:04Z↓, 10-13 05:31Z↑",
       "☽ Moon: 10-12 22:31Z↑, 10-13 06:12Z↓, 40% lit",
@@ -339,14 +433,22 @@ test("briefingLines omits sections the payload has no data for", () => {
     celestialNights: [],
     spaceEvents: [],
     comfortTier: null,
+    departure: null,
+    capAlerts: [],
+    fronts: null,
+    zoneTransitions: [],
   });
   const lines = briefingLines({ payload, meta: {}, now: NOW });
   assert.ok(!lines.includes("Warnings:"));
+  assert.ok(!lines.includes("🚨 Alerts:"));
   assert.ok(!lines.includes("⚠ Hazards:"));
+  assert.ok(!lines.includes("🌬 Fronts:"));
   assert.ok(!lines.includes("🔋 Energy:"));
+  assert.ok(!lines.includes("⚑ Waters:"));
   assert.ok(!lines.includes("☾ Tonight:"));
   assert.ok(!lines.includes("✦ Sky:"));
   assert.ok(!lines.some((line) => line.startsWith("Comfort:")));
+  assert.ok(!lines.some((line) => line.startsWith("⚓ Departure:")));
 });
 
 test("conditionsLines falls back to the payload's own window when forecasts slid past", () => {
@@ -357,8 +459,11 @@ test("conditionsLines falls back to the payload's own window when forecasts slid
 
 test("micronizeLine turns section labels into headers and colors hazards", () => {
   assert.equal(micronizeLine("Warnings:"), ">Warnings");
+  assert.equal(micronizeLine("🚨 Alerts:"), ">🚨 Alerts");
   assert.equal(micronizeLine("⚠ Hazards:"), ">⚠ Hazards");
+  assert.equal(micronizeLine("🌬 Fronts:"), ">🌬 Fronts");
   assert.equal(micronizeLine("🔋 Energy:"), ">🔋 Energy");
+  assert.equal(micronizeLine("⚑ Waters:"), ">⚑ Waters");
   assert.equal(
     micronizeLine("red Earthquake: M 6.2 nearby (120 nm NE)"),
     "`F900red`f Earthquake: M 6.2 nearby (120 nm NE)",
@@ -366,6 +471,14 @@ test("micronizeLine turns section labels into headers and colors hazards", () =>
   assert.equal(
     micronizeLine("orange Severe storm: rising (30 nm N)"),
     "`Faa0orange`f Severe storm: rising (30 nm N)",
+  );
+  assert.equal(
+    micronizeLine("EXTREME Tsunami Warning — move to deep water"),
+    "`F900EXTREME`f Tsunami Warning — move to deep water",
+  );
+  assert.equal(
+    micronizeLine("SEVERE Gale warning issued"),
+    "`Faa0SEVERE`f Gale warning issued",
   );
   assert.equal(
     micronizeLine("Wind: 12-18 kn from SW"),
@@ -386,6 +499,7 @@ test("briefingMarkdown renders the Markdown LXMF reply", () => {
       [
         "- Compiled 10-12 08:00Z, 30m old",
         "- Conditions here, next 24h",
+        "- ⚓ **Departure:** First light 10-12 09:00Z",
         "- **Comfort:** easy",
         "- **Wind:** 12-18 kn from WSW, gusts to 24 kn",
         "- **Waves:** max 1.4 m at 7 s",
@@ -393,10 +507,18 @@ test("briefingMarkdown renders the Markdown LXMF reply", () => {
         "- **Cloud cover:** up to 90 %",
         "- **Warnings**",
         "- GALE WARNING. Winds 30 to 40 kn.",
+        "- 🚨 **Alerts**",
+        "- EXTREME Tsunami Warning — Tsunami warning for coastal areas — expires 10-13 06:00Z",
+        "- Move vessels to deep water",
         "- ⚠ **Hazards**",
         "- **red Earthquake:** M 6.2 nearby (120 nm NE)",
+        "- 🌬 **Fronts**",
+        "- Cold front crossing 10-13 06:00Z, wind shift ~40°",
+        "- Automatic analysis — official charts are authoritative",
         "- 🔋 **Energy**",
         "- Surplus 2.1 kWh until 10-12 14:00Z",
+        "- ⚑ **Waters**",
+        "- Leaves Finland waters at 214 nm — ocean beyond",
         "- ☾ **Tonight**",
         "- ☀ **Sun:** 10-12 19:04Z↓, 10-13 05:31Z↑",
         "- ☽ **Moon:** 10-12 22:31Z↑, 10-13 06:12Z↓, 40% lit",

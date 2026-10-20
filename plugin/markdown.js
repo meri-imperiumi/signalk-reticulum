@@ -19,7 +19,7 @@
  * A leading glyph (the briefing webapp's timeline marks: ⚠ 🔋 ☾ ✦ ☀ ☽) kept
  * outside a bolded label.
  */
-const GLYPH_PREFIX = "(?:⚠|🔋|☾|☽|✦|☀)\\s";
+const GLYPH_PREFIX = "(?:⚠|🔋|☾|☽|✦|☀|🌬|⚑|🚨|⚓)\\s";
 
 /**
  * Bolds a line's leading `Label:` — "**Depth:** 5.2 m below surface". An

@@ -40,6 +40,12 @@ const META_GENERATED_AT = "navigation.briefing.generatedAt";
 const META_ROUTE = "navigation.briefing.route";
 const META_COMFORT = "navigation.briefing.comfort";
 const META_STALE = "navigation.briefing.stale";
+/** The vessel's timezone offset from UTC, published by signalk-ships-time
+ * (`(-)hhmm` encoding, e.g. `200` = UTC+2, `-930` = UTC-9:30). Times in the
+ * briefing render in the ship's time when it is available (the Signal K
+ * visuals convention: ship's time with no timezone specifier), falling back
+ * to explicit-`Z` UTC when the path carries no value. */
+const META_TIME_OFFSET = "environment.time.timezoneOffset";
 
 /**
  * The briefing plugin's own freshness thresholds (its HERE_TTL_MS and
@@ -56,6 +62,9 @@ const PAST_GRACE_MS = 60 * 60 * 1000;
 /** Upper bound on the sky-event and hazard lines rendered. */
 const MAX_HAZARD_LINES = 6;
 const MAX_SKY_LINES = 6;
+/** Upper bound on the CAP-alert and front-passage lines rendered. */
+const MAX_ALERT_LINES = 6;
+const MAX_FRONT_LINES = 6;
 
 /**
  * Resolves the briefing plugin's data dir from the server config layout:
@@ -141,7 +150,30 @@ function briefMeta(app) {
     route: selfValue(app, META_ROUTE),
     comfort: selfValue(app, META_COMFORT),
     stale: selfValue(app, META_STALE),
+    timeOffset: selfValue(app, META_TIME_OFFSET),
   };
+}
+
+/**
+ * Parses a Signal K `environment.time.timezoneOffset` value (`(-)hhmm`
+ * encoding, e.g. `200` = UTC+2, `-930` = UTC-9:30) into minutes. Accepts
+ * numbers and numeric strings; null when absent or malformed (minutes ≥ 60,
+ * |hhmm| ≥ 2400, non-finite) — the same rules the briefing webapp applies.
+ *
+ * @param {number|string|null|undefined} value
+ * @returns {number|null} Offset in minutes, or null when unusable.
+ */
+function parseTimezoneOffset(value) {
+  const raw = typeof value === "string" ? Number(value) : value;
+  if (raw == null || !Number.isFinite(raw)) {
+    return null;
+  }
+  const abs = Math.abs(Math.round(raw));
+  const minutes = Math.trunc(abs / 100) * 60 + (abs % 100);
+  if (abs % 100 >= 60 || abs >= 2400) {
+    return null;
+  }
+  return Math.sign(raw) * minutes;
 }
 
 /**
@@ -213,19 +245,43 @@ function parseUtc(iso) {
 
 /**
  * Formats an ISO instant as `MM-DD HH:MMZ` (UTC, explicitly suffixed) — the
- * same stamp shape the briefing webapp uses.
+ * fallback stamp when the vessel publishes no ship's time.
  *
  * @param {string} iso
  * @returns {string} Empty when the instant is unparseable.
  */
 function fmtUtc(iso) {
+  return fmtStamp(iso, null);
+}
+
+/**
+ * Formats an ISO instant for the mesh report. With the vessel's timezone
+ * offset it renders the stamp in the ship's local time as `MM-DD HH:MM` —
+ * no timezone specifier, the Signal K visuals convention for ship's time —
+ * and without an offset it falls back to explicit-`Z` UTC
+ * (`MM-DD HH:MMZ`). Both carry the same `MM-DD HH:MM` shape the briefing
+ * webapp stamps with; the webapp appends the offset label instead of the
+ * bare local time, the mesh text stays with the visuals rule.
+ *
+ * @param {string} iso
+ * @param {number|null} [offsetMinutes] - Ship's timezone offset from UTC
+ *   in minutes (from {@link parseTimezoneOffset}), null for UTC.
+ * @returns {string} Empty when the instant is unparseable.
+ */
+function fmtStamp(iso, offsetMinutes = null) {
   const ms = parseUtc(iso);
   if (!Number.isFinite(ms)) {
     return "";
   }
-  const d = new Date(ms);
+  const shifted =
+    Number.isFinite(offsetMinutes) && offsetMinutes !== null
+      ? new Date(ms + offsetMinutes * 60000)
+      : new Date(ms);
   const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}Z`;
+  const body = `${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())} ${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}`;
+  return Number.isFinite(offsetMinutes) && offsetMinutes !== null
+    ? body
+    : `${body}Z`;
 }
 
 /**
@@ -487,14 +543,16 @@ function hazardLines(payload) {
  * @param {object} payload
  * @returns {string[]} The label line plus one line per event.
  */
-function energyLines(payload) {
+function energyLines(payload, offsetMinutes = null) {
   const events = Array.isArray(payload?.energyEvents)
     ? payload.energyEvents
     : [];
   const lines = events.map((event) => {
     if (event?.type === "surplus") {
       const netWh = Number.isFinite(event.netWh) ? event.netWh : null;
-      const until = event.endTimestamp ? fmtUtc(event.endTimestamp) : "";
+      const until = event.endTimestamp
+        ? fmtStamp(event.endTimestamp, offsetMinutes)
+        : "";
       const parts = ["Surplus"];
       if (netWh !== null) {
         parts.push(`${rounded(netWh / 1000)} kWh`);
@@ -527,7 +585,7 @@ function energyLines(payload) {
  * @param {object} payload
  * @returns {string[]} The label line plus one or two lines.
  */
-function tonightLines(payload) {
+function tonightLines(payload, offsetMinutes = null) {
   const night = Array.isArray(payload?.celestialNights)
     ? payload.celestialNights[0]
     : null;
@@ -536,8 +594,8 @@ function tonightLines(payload) {
   }
   const lines = [];
   const sun = [];
-  const sunset = fmtUtc(night.sunset);
-  const sunrise = fmtUtc(night.sunrise);
+  const sunset = fmtStamp(night.sunset, offsetMinutes);
+  const sunrise = fmtStamp(night.sunrise, offsetMinutes);
   // The ↓/↑ arrows are the briefing webapp's own sky-segment marks: setting
   // and rising crossings after the time stamp
   if (sunset) {
@@ -550,8 +608,8 @@ function tonightLines(payload) {
     lines.push(`☀ Sun: ${sun.join(", ")}`);
   }
   const moon = [];
-  const moonrise = fmtUtc(night.moonrise);
-  const moonset = fmtUtc(night.moonset);
+  const moonrise = fmtStamp(night.moonrise, offsetMinutes);
+  const moonset = fmtStamp(night.moonset, offsetMinutes);
   if (moonrise) {
     moon.push(`${moonrise}↑`);
   }
@@ -575,7 +633,7 @@ function tonightLines(payload) {
  * @param {Date} [now]
  * @returns {string[]} The label line plus up to {@link MAX_SKY_LINES} events.
  */
-function skyLines(payload, now = new Date()) {
+function skyLines(payload, now = new Date(), offsetMinutes = null) {
   const events = Array.isArray(payload?.spaceEvents) ? payload.spaceEvents : [];
   const upcoming = events
     .map((event) => ({
@@ -590,10 +648,160 @@ function skyLines(payload, now = new Date()) {
     .filter(({ ms }) => ms <= horizon)
     .slice(0, MAX_SKY_LINES)
     .map(({ ms, description }) => {
-      const stamp = fmtUtc(new Date(ms).toISOString());
+      const stamp = fmtStamp(new Date(ms).toISOString(), offsetMinutes);
       return stamp ? `${stamp} ${description}` : description;
     });
   return lines.length ? ["✦ Sky:", ...lines] : [];
+}
+
+/**
+ * The effective departure the served schedule anchors to (work doc #15):
+ * the auto daylight anchor or the crew's override, with the anchor's own
+ * reason wording — "Underway — from now", "First light …". Absent on a
+ * here payload, which has no schedule to anchor.
+ *
+ * @param {object} payload
+ * @param {number|null} [offsetMinutes] - Ship's timezone offset in minutes.
+ * @returns {string[]} The line, or nothing.
+ */
+function departureLines(payload, offsetMinutes = null) {
+  const departure = payload?.departure;
+  if (!departure || typeof departure.time !== "string") {
+    return [];
+  }
+  const stamp = fmtStamp(departure.time, offsetMinutes);
+  let text;
+  if (departure.reason === "underway") {
+    text = "Underway — from now";
+  } else if (departure.reason === "next_dawn" && stamp) {
+    text = `First light ${stamp}`;
+  } else if (departure.reason === "daylight_prep" && stamp) {
+    text = `${stamp}, after prep`;
+  } else if (departure.reason === "no_dawn" && stamp) {
+    text = `${stamp}, no dawn in forecast`;
+  } else {
+    text = stamp || null;
+  }
+  return text ? [`⚓ Departure: ${text}`] : [];
+}
+
+/**
+ * The official CAP alerts the briefing kept near the vessel or route —
+ * the alerting-feed counterpart of the METAREA bulletin blocks, rendered
+ * the way the briefing webapp's alert card reads them: severity, event
+ * or headline, expiry, and the instruction on its own line.
+ *
+ * @param {object} payload
+ * @param {number|null} [offsetMinutes] - Ship's timezone offset in minutes.
+ * @returns {string[]} The label line plus up to {@link MAX_ALERT_LINES}
+ *   alerts (instruction lines ride along uncounted).
+ */
+function capLines(payload, offsetMinutes = null) {
+  const alerts = Array.isArray(payload?.capAlerts) ? payload.capAlerts : [];
+  if (!alerts.length) {
+    return [];
+  }
+  const lines = [];
+  for (const alert of alerts.slice(0, MAX_ALERT_LINES)) {
+    const severity =
+      typeof alert.severity === "string" && alert.severity
+        ? alert.severity.toUpperCase()
+        : null;
+    const event = (typeof alert.event === "string" && alert.event.trim()) || "";
+    const headline =
+      (typeof alert.headline === "string" && alert.headline.trim()) || "";
+    const body =
+      event && headline && event !== headline
+        ? `${event} — ${headline}`
+        : headline || event || "Official alert";
+    const parts = [severity ? `${severity} ${body}` : body];
+    const expires = alert.expires ? fmtStamp(alert.expires, offsetMinutes) : "";
+    if (expires) {
+      parts.push(`expires ${expires}`);
+    }
+    lines.push(parts.join(" — "));
+    if (typeof alert.instruction === "string" && alert.instruction.trim()) {
+      lines.push(alert.instruction.trim());
+    }
+  }
+  return lines.length ? ["🚨 Alerts:", ...lines] : [];
+}
+
+/**
+ * The tracked synoptic fronts crossing the boat's scheduled position
+ * (work doc #50), one line per passage with the expected wind shift, plus
+ * the automatic-analysis caveat — the briefing carries it on every render,
+ * and the mesh text is one.
+ *
+ * @param {object} payload
+ * @param {number|null} [offsetMinutes] - Ship's timezone offset in minutes.
+ * @returns {string[]} The label line, one line per passage and the caveat.
+ */
+function frontLines(payload, offsetMinutes = null) {
+  const passages = Array.isArray(payload?.fronts?.passages)
+    ? payload.fronts.passages
+    : [];
+  if (!passages.length) {
+    return [];
+  }
+  const KIND_LABELS = {
+    cold: "Cold front",
+    warm: "Warm front",
+    stationary: "Stationary front",
+    front: "Front",
+    trough: "Trough",
+  };
+  const lines = passages.slice(0, MAX_FRONT_LINES).map((passage) => {
+    const label = KIND_LABELS[passage?.kind] ?? "Front";
+    const stamp = fmtStamp(passage?.time, offsetMinutes);
+    let text = stamp ? `${label} crossing ${stamp}` : `${label} crossing`;
+    if (Number.isFinite(passage?.shiftDeg)) {
+      text += `, wind shift ~${Math.round(passage.shiftDeg)}°`;
+    }
+    return text;
+  });
+  return [
+    "🌬 Fronts:",
+    ...lines,
+    "Automatic analysis — official charts are authoritative",
+  ];
+}
+
+/**
+ * The territorial-waters transitions along the route (work doc #17):
+ * enter/leave crossings with the distance along the plan they happen at
+ * (the payload's own convention — from the boat on a trimmed briefing),
+ * and the ocean-connectivity marker on a leave — beyond it the metered-
+ * ocean rules apply. The payload carries distances, not times; the webapp
+ * derives the hours from its own simulation, which the mesh text does not
+ * run.
+ *
+ * @param {object} payload
+ * @returns {string[]} The label line plus one line per transition.
+ */
+function zoneLines(payload) {
+  const transitions = Array.isArray(payload?.zoneTransitions)
+    ? payload.zoneTransitions
+    : [];
+  if (!transitions.length) {
+    return [];
+  }
+  const lines = transitions.map((transition) => {
+    const name =
+      (typeof transition?.territory?.name === "string" &&
+        transition.territory.name) ||
+      "territorial waters";
+    const verb = transition?.kind === "leave" ? "Leaves" : "Enters";
+    let text = `${verb} ${name} waters`;
+    if (Number.isFinite(transition?.distanceFromStartNm)) {
+      text += ` at ${Math.round(transition.distanceFromStartNm)} nm`;
+    }
+    if (transition?.connectivity === "ocean") {
+      text += " — ocean beyond";
+    }
+    return text;
+  });
+  return lines.length ? ["⚑ Waters:", ...lines] : [];
 }
 
 /**
@@ -613,8 +821,9 @@ function briefingLines({ payload, meta = {}, now = new Date() } = {}) {
   if (!payload?.waypoints?.length) {
     return [];
   }
+  const timeOffset = parseTimezoneOffset(meta.timeOffset);
   const lines = [];
-  const stamp = fmtUtc(payload.metadata?.fetchedAt);
+  const stamp = fmtStamp(payload.metadata?.fetchedAt, timeOffset);
   if (stamp) {
     let line = `Compiled ${stamp}`;
     const age = fmtAge(payload.metadata?.fetchedAt, now);
@@ -629,6 +838,7 @@ function briefingLines({ payload, meta = {}, now = new Date() } = {}) {
   const route =
     typeof meta.route === "string" && meta.route ? meta.route : null;
   lines.push(route ? `Route: ${route}` : "Conditions here, next 24h");
+  lines.push(...departureLines(payload, timeOffset));
   const comfort =
     (typeof payload.comfortTier === "string" && payload.comfortTier) ||
     (typeof meta.comfort === "string" && meta.comfort) ||
@@ -638,10 +848,13 @@ function briefingLines({ payload, meta = {}, now = new Date() } = {}) {
   }
   lines.push(...conditionsLines(payload, now));
   lines.push(...bulletinLines(payload));
+  lines.push(...capLines(payload, timeOffset));
   lines.push(...hazardLines(payload));
-  lines.push(...energyLines(payload));
-  lines.push(...tonightLines(payload));
-  lines.push(...skyLines(payload, now));
+  lines.push(...frontLines(payload, timeOffset));
+  lines.push(...energyLines(payload, timeOffset));
+  lines.push(...zoneLines(payload));
+  lines.push(...tonightLines(payload, timeOffset));
+  lines.push(...skyLines(payload, now, timeOffset));
   return lines;
 }
 
@@ -651,8 +864,11 @@ function briefingLines({ payload, meta = {}, now = new Date() } = {}) {
 // ✦ space).
 const SECTION_LABELS = [
   "Warnings:",
+  "🚨 Alerts:",
   "⚠ Hazards:",
+  "🌬 Fronts:",
   "🔋 Energy:",
+  "⚑ Waters:",
   "☾ Tonight:",
   "✦ Sky:",
 ];
@@ -669,6 +885,9 @@ const HAZARD_LEVEL_COLORS = {
   orange: MICRON_AMBER,
   amber: MICRON_AMBER,
   green: MICRON_GREEN,
+  // CAP severities (the webapp renders them uppercase)
+  extreme: MICRON_RED,
+  severe: MICRON_AMBER,
 };
 
 /**
@@ -684,7 +903,7 @@ function micronizeLine(line) {
     return `>${line.slice(0, -1)}`;
   }
   const level = line.split(" ")[0];
-  const color = HAZARD_LEVEL_COLORS[level];
+  const color = HAZARD_LEVEL_COLORS[level.toLowerCase()];
   if (color) {
     return `${color}${level}${MICRON_RESET}${line.slice(level.length)}`;
   }
@@ -738,6 +957,7 @@ module.exports = {
   META_ROUTE,
   META_COMFORT,
   META_STALE,
+  META_TIME_OFFSET,
   briefingDataDir,
   briefingAvailable,
   briefMeta,
@@ -746,14 +966,20 @@ module.exports = {
   briefingMarkdown,
   briefingPage,
   fmtUtc,
+  fmtStamp,
+  parseTimezoneOffset,
   fmtAge,
   compass,
   parseUtc,
   isStale,
   conditionsLines,
   bulletinLines,
+  capLines,
   hazardLines,
+  frontLines,
   energyLines,
+  zoneLines,
+  departureLines,
   tonightLines,
   skyLines,
   micronizeLine,
