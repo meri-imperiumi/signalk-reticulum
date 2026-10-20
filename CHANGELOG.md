@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.9.1] - 2026-10-21
 ### Added
 - **The mesh briefing carries the briefing plugin's newer payload sections.** The NomadNet page, the LXMF `Briefing` command reply and the daily subscriber push read the same cached payload but only rendered the sections the renderer grew up with — the newer compile output rode along invisibly. Four sections join the shared body lines, all mirroring what the briefing webapp shows: official CAP alerts (`🚨 Alerts:` — severity, event and headline, expiry in ship's time, the instruction on its own line, severities colored on the micron page like the GDACS levels); tracked synoptic front crossings (`🌬 Fronts:` — one line per passage with kind, crossing time and expected wind shift, closed by the automatic-analysis caveat the briefing attaches to every render of the fronts block); territorial-waters transitions (`⚑ Waters:` — enter/leave with the distance along the plan and the ocean-connectivity marker on a leave, the payload's distances-not-times convention stated honestly since the mesh text runs no simulation); and the effective departure (`⚓ Departure:` — the auto daylight anchor's own wording, "Underway — from now" or "First light …", absent on a here payload which has no schedule to anchor). Lines the payload has no data for stay omitted, as before.
 ### Changed
