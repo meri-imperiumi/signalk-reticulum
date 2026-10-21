@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.9.2] - 2026-10-21
 ### Fixed
 - **The daily briefing push keeps its once-per-day contract across restarts instead of re-delivering a stale compile.** The subscriber store recorded only the local calendar day of the last send, so the gate was open again the moment the day rolled over: a plugin or boat restart on any later day — via the startup catch-up or the replayed `navigation.briefing.generatedAt` value — pushed whatever compile still sat in the briefing plugin's cache, however old it was and even though every subscriber had already received it. The store now also records the delivered compile's `fetchedAt` per subscriber, and dispatch sends a cached compile only when it is newer than the last one that subscriber received — an already-delivered compile is never re-sent no matter how many restarts or midnight rollovers happen, while a genuinely fresh compile still goes out (at most once per subscriber per local day, as before). Subscriptions written by 0.9.1 work as-is — until the first send stamps the delivered compile, their persisted send instant serves as the floor, so the upgrade itself does not re-deliver the compile that send covered. Covered by `tests/brief-subscriptions.test.js`
 
