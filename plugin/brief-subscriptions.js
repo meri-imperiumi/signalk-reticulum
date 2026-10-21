@@ -8,11 +8,18 @@
  * `signalk-passage-briefing` plugin compiles a fresh payload it stamps
  * `navigation.briefing.generatedAt` on the bus, and subscribers then receive
  * exactly that compile — maximally fresh by construction, with the render's
- * compile-stamp and staleness marker telling the truth about its age. A
- * per-subscriber once-per-day gate (the local calendar day of the last send,
- * persisted with the subscription) keeps the four daily cron compiles and any
- * internet-transition oneshots from flooding anyone, and makes a plugin
- * restart neither lose nor double the day's briefing.
+ * compile-stamp and staleness marker telling the truth about its age. Two
+ * persisted per-subscriber gates keep that contract across restarts: the
+ * once-per-local-day gate (the calendar day of the last send) keeps the four
+ * daily cron compiles and any internet-transition oneshots from flooding
+ * anyone, and the compile gate (the `fetchedAt` of the last delivered
+ * compile) keeps a restart from ever re-delivering a compile the subscriber
+ * already received, however stale the cache still is. Stores from before the
+ * compile gate existed bridge on their persisted send instant until the
+ * first post-upgrade send stamps the compile, so the upgrade itself does not
+ * repeat an older day's briefing. Together a compile is delivered at most
+ * once per subscriber and at most one briefing goes out per local day —
+ * restarts neither lose, double, nor repeat.
  *
  * Subscriptions persist as JSON in the plugin data dir
  * (`brief-subscriptions.json`), written atomically. Deliberately plugin-data,
@@ -139,14 +146,16 @@ function todayKey(now) {
 }
 
 /**
- * Sends the day's briefing to every subscribed, currently-configured crew
- * member who has not had it today. The briefing payload is loaded once and
- * rendered once — every recipient gets the identical compile — and the store
- * is marked per successfully delivered recipient only, so a failed delivery
- * retries on the next compile instead of costing the subscriber their daily
- * briefing. When the briefing plugin has nothing cached (or its payload
- * renders no lines) nobody is sent or marked: there is nothing fresh to say,
- * and the next compile will retry.
+ * Sends the briefing to every subscribed, currently-configured crew member
+ * who has not had it today and for whom the cached compile is new: a compile
+ * already delivered to them (its `fetchedAt` at or after the last one sent)
+ * is never re-delivered, however many restarts or day rollovers pass. The
+ * briefing payload is loaded once and rendered once — every recipient gets
+ * the identical compile — and the store is marked per successfully delivered
+ * recipient only, so a failed delivery retries on the next compile instead
+ * of costing the subscriber their daily briefing. When the briefing plugin
+ * has nothing cached (or its payload renders no lines) nobody is sent or
+ * marked: there is nothing fresh to say, and the next compile will retry.
  *
  * @param {object} [params]
  * @param {object} [params.settings] - Plugin settings (the `crew` list is
@@ -183,19 +192,42 @@ async function dispatchBriefings({
     crew.map((member) => [member.destinationHash, member]),
   );
   const today = todayKey(now);
-  const pending = Object.keys(subscriptions).filter(
-    (hash) =>
+  // The crew and day pre-filter stays ahead of the briefing load, so the
+  // common everyone-is-current case costs no cache read and no log noise.
+  const awaiting = Object.keys(subscriptions).filter((hash) => {
+    const entry = subscriptions[hash];
+    return (
       crewByHash.has(hash) &&
-      subscriptions[hash] &&
-      typeof subscriptions[hash] === "object" &&
-      subscriptions[hash].lastSentDay !== today,
-  );
-  if (pending.length === 0) {
+      entry &&
+      typeof entry === "object" &&
+      entry.lastSentDay !== today
+    );
+  });
+  if (awaiting.length === 0) {
     return 0;
   }
   const briefing = await loadBriefing(app);
   if (!briefing) {
     log("Daily briefing skipped: the briefing plugin has nothing cached");
+    return 0;
+  }
+  // The compile gate: a compile a subscriber already received — the last
+  // sent fetchedAt at or after the cached one (equal is the common case;
+  // newer also covers a cache rollback) — is never re-delivered. This is
+  // what makes a restart with a stale cache a no-op instead of a repeat of
+  // an older day's briefing. Stores written before the gate existed carry
+  // only the send instant; it is the best-known floor, because a dispatch
+  // delivers the compile then newest — so a cached compile at or before the
+  // last send was already received too.
+  const pending = awaiting.filter((hash) => {
+    const entry = subscriptions[hash];
+    const floor =
+      typeof entry.lastSentFetchedAt === "string"
+        ? entry.lastSentFetchedAt
+        : entry.lastSentAt;
+    return !(typeof floor === "string" && floor >= briefing.fetchedAt);
+  });
+  if (pending.length === 0) {
     return 0;
   }
   const meta = briefMeta(app);
@@ -211,6 +243,7 @@ async function dispatchBriefings({
       await deliver(hash, "Daily briefing", content, null, { markdown: true });
       subscriptions[hash].lastSentDay = today;
       subscriptions[hash].lastSentAt = now.toISOString();
+      subscriptions[hash].lastSentFetchedAt = briefing.fetchedAt;
       sent += 1;
     } catch (e) {
       log(`Daily briefing delivery to ${hash} failed: ${e.message}`);

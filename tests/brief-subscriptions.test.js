@@ -378,22 +378,187 @@ test("dispatch sends the fresh compile once per subscriber per day", async () =>
     });
     assert.equal(again, 0);
     assert.equal(calls.length, 2);
-    // A new day sends again.
+    // And a new day does not re-deliver the same compile either — what is
+    // new to the subscriber is the compile, not the calendar date.
     const nextDay = await dispatchBriefings({
       settings,
       deliver,
       app,
       now: new Date(2026, 9, 13, 6, 30, 0),
     });
-    assert.equal(nextDay, 2);
-    // And the send day is persisted for restart safety.
+    assert.equal(nextDay, 0);
+    assert.equal(calls.length, 2);
+    // The delivered compile's fetchedAt is persisted for restart safety.
     const { subscriptions } = await loadSubscriptions(app);
     assert.equal(
-      subscriptions[SOURCE_HEX].lastSentDay,
-      todayKey(new Date(2026, 9, 13, 6, 30, 0)),
-      "the newest send's day wins",
+      subscriptions[SOURCE_HEX].lastSentFetchedAt,
+      "2026-10-12T08:00:00.000Z",
     );
     assert.ok(subscriptions[SOURCE_HEX].lastSentAt);
+    // A genuinely fresh compile goes out on the new day.
+    const weather = path.join(
+      app.config.configPath,
+      "plugin-config-data",
+      BRIEFING_PLUGIN_ID,
+      "weather",
+    );
+    fs.writeFileSync(
+      path.join(weather, "latest-20261013.json"),
+      JSON.stringify(
+        makePayload({
+          metadata: {
+            fetchedAt: "2026-10-13T05:00:00.000Z",
+            source: "api",
+            mode: "here",
+          },
+        }),
+      ),
+    );
+    const fresh = await dispatchBriefings({
+      settings,
+      deliver,
+      app,
+      now: new Date(2026, 9, 13, 6, 30, 0),
+    });
+    assert.equal(fresh, 2);
+    assert.equal(calls.length, 4);
+    const updated = await loadSubscriptions(app);
+    assert.equal(
+      updated.subscriptions[SOURCE_HEX].lastSentFetchedAt,
+      "2026-10-13T05:00:00.000Z",
+      "the newest send's compile wins",
+    );
+    assert.equal(
+      updated.subscriptions[SOURCE_HEX].lastSentDay,
+      todayKey(new Date(2026, 9, 13, 6, 30, 0)),
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("a restart never re-delivers a compile the subscriber already received", async () => {
+  const { app, cleanup } = makeEnv();
+  try {
+    await saveSubscriptions(subscriptionsPath(app), {
+      [SOURCE_HEX]: { subscribedAt: "iso" },
+    });
+    const settings = crewOf(SOURCE_HEX);
+    const { deliver, calls } = makeDeliver();
+    assert.equal(
+      await dispatchBriefings({ settings, deliver, app, now: MORNING }),
+      1,
+    );
+    // Days later the same compile is still the freshest cached one — a
+    // restart's catch-up dispatch (or the replayed generatedAt) must not
+    // push it again, whatever the calendar says.
+    const daysLater = new Date(2026, 9, 15, 7, 0, 0);
+    assert.equal(
+      await dispatchBriefings({ settings, deliver, app, now: daysLater }),
+      0,
+    );
+    assert.equal(calls.length, 1);
+    // The same restart delivers a compile that is new to the subscriber.
+    const weather = path.join(
+      app.config.configPath,
+      "plugin-config-data",
+      BRIEFING_PLUGIN_ID,
+      "weather",
+    );
+    fs.writeFileSync(
+      path.join(weather, "latest-20261015.json"),
+      JSON.stringify(
+        makePayload({
+          metadata: {
+            fetchedAt: "2026-10-15T05:00:00.000Z",
+            source: "api",
+            mode: "here",
+          },
+        }),
+      ),
+    );
+    assert.equal(
+      await dispatchBriefings({ settings, deliver, app, now: daysLater }),
+      1,
+    );
+    assert.equal(calls.length, 2);
+    // And the next restart does not repeat the fresh compile either.
+    assert.equal(
+      await dispatchBriefings({
+        settings,
+        deliver,
+        app,
+        now: new Date(2026, 9, 16, 6, 0, 0),
+      }),
+      0,
+    );
+    assert.equal(calls.length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a pre-compile-gate store does not re-deliver the compile its last send covered", async () => {
+  const { app, cleanup } = makeEnv();
+  try {
+    // A store written before the compile gate existed: only the send day and
+    // instant. The 08:00Z compile was delivered by that 09:00Z send.
+    await saveSubscriptions(subscriptionsPath(app), {
+      [SOURCE_HEX]: {
+        subscribedAt: "iso",
+        lastSentDay: "2026-10-12",
+        lastSentAt: "2026-10-12T09:00:00.000Z",
+      },
+    });
+    const settings = crewOf(SOURCE_HEX);
+    const { deliver, calls } = makeDeliver();
+    // The next day's first dispatch (the upgrade's catch-up) must not
+    // re-deliver the compile the last send already covered.
+    assert.equal(
+      await dispatchBriefings({
+        settings,
+        deliver,
+        app,
+        now: new Date(2026, 9, 13, 6, 30, 0),
+      }),
+      0,
+    );
+    assert.equal(calls.length, 0);
+    // But a compile newer than that send still goes out.
+    const weather = path.join(
+      app.config.configPath,
+      "plugin-config-data",
+      BRIEFING_PLUGIN_ID,
+      "weather",
+    );
+    fs.writeFileSync(
+      path.join(weather, "latest-20261013.json"),
+      JSON.stringify(
+        makePayload({
+          metadata: {
+            fetchedAt: "2026-10-13T05:00:00.000Z",
+            source: "api",
+            mode: "here",
+          },
+        }),
+      ),
+    );
+    assert.equal(
+      await dispatchBriefings({
+        settings,
+        deliver,
+        app,
+        now: new Date(2026, 9, 13, 6, 30, 0),
+      }),
+      1,
+    );
+    assert.equal(calls.length, 1);
+    const { subscriptions } = await loadSubscriptions(app);
+    assert.equal(
+      subscriptions[SOURCE_HEX].lastSentFetchedAt,
+      "2026-10-13T05:00:00.000Z",
+      "the first send seeds the compile gate",
+    );
   } finally {
     cleanup();
   }

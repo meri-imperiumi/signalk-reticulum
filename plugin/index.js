@@ -1975,9 +1975,10 @@ module.exports = (app) => {
         // plugin compiles a fresh payload it stamps
         // `navigation.briefing.generatedAt` on the bus, and subscribed crew
         // members (the "Subscribe briefing" command) then receive exactly
-        // that compile — maximally fresh, at most once per day (the day gate
-        // lives in the persisted subscription store, so restarts neither
-        // lose nor double the day's briefing). Dispatches are serialized and
+        // that compile — maximally fresh, at most once per day and never a
+        // compile they already received (both gates live in the persisted
+        // subscription store, so restarts neither lose nor double the day's
+        // briefing nor repeat an older one). Dispatches are serialized and
         // failures are per-recipient, like the notification forwards.
         if (app.subscriptionmanager) {
           try {
@@ -2028,7 +2029,8 @@ module.exports = (app) => {
         }
         // Startup catch-up: a restart between this morning's compile and now
         // must still deliver today's briefing to subscribers who have not
-        // had it. The day gate makes this a no-op when everyone is current.
+        // had it. The day and compile gates make this a no-op when everyone
+        // is current — and keep a stale cached compile from being re-pushed.
         const briefingCatchup = setTimeout(() => {
           Promise.resolve(
             queueBriefingDispatch({
