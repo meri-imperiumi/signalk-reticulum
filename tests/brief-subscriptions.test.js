@@ -760,3 +760,119 @@ test("dispatch is a no-op without subscribers, crew, deliver or storage", async 
     cleanup();
   }
 });
+
+// --- store races ------------------------------------------------------------
+
+// Deliveries can hold the dispatch's loaded store copy for minutes over the
+// mesh; whatever the crew writes during that window must survive the
+// write-back of the older copy.
+
+test("a subscription created during an in-flight dispatch survives its save", async () => {
+  const { app, cleanup } = makeEnv();
+  try {
+    await saveSubscriptions(subscriptionsPath(app), {
+      [OTHER_HEX]: { subscribedAt: "iso" },
+    });
+    const settings = crewOf(SOURCE_HEX, OTHER_HEX);
+    let releaseDispatch;
+    const deliveryStarted = new Promise((resolve) => {
+      releaseDispatch = resolve;
+    });
+    let finishDispatch;
+    const deliveryBlocked = new Promise((resolve) => {
+      finishDispatch = resolve;
+    });
+    const deliver = async (destHash) => {
+      if (destHash === OTHER_HEX) {
+        // Hold the dispatch mid-delivery, store copy already loaded.
+        releaseDispatch();
+        await deliveryBlocked;
+      }
+    };
+    const dispatch = dispatchBriefings({
+      settings,
+      deliver,
+      app,
+      now: MORNING,
+    });
+    await deliveryStarted;
+
+    // While the push is running, the sender subscribes.
+    const { deliver: commandDeliver, calls } = makeDeliver();
+    await briefingSubscribe.handle(
+      makeMessage("Subscribe briefing"),
+      {},
+      commandDeliver,
+      app,
+    );
+    assert.match(calls[0].content, /Subscribed/);
+
+    finishDispatch();
+    assert.equal(await dispatch, 1);
+    const { subscriptions } = await loadSubscriptions(app);
+    assert.equal(
+      typeof subscriptions[SOURCE_HEX],
+      "object",
+      "the mid-flight subscription is not erased by the dispatch write-back",
+    );
+    assert.match(subscriptions[SOURCE_HEX].subscribedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(subscriptions[OTHER_HEX].lastSentDay, todayKey(MORNING));
+  } finally {
+    cleanup();
+  }
+});
+
+test("an unsubscribe during an in-flight dispatch is not resurrected", async () => {
+  const { app, cleanup } = makeEnv();
+  try {
+    await saveSubscriptions(subscriptionsPath(app), {
+      [SOURCE_HEX]: { subscribedAt: "iso" },
+      [OTHER_HEX]: { subscribedAt: "iso" },
+    });
+    const settings = crewOf(SOURCE_HEX, OTHER_HEX);
+    let releaseDispatch;
+    const deliveryStarted = new Promise((resolve) => {
+      releaseDispatch = resolve;
+    });
+    let finishDispatch;
+    const deliveryBlocked = new Promise((resolve) => {
+      finishDispatch = resolve;
+    });
+    const deliver = async (destHash) => {
+      if (destHash === OTHER_HEX) {
+        releaseDispatch();
+        await deliveryBlocked;
+      }
+    };
+    const dispatch = dispatchBriefings({
+      settings,
+      deliver,
+      app,
+      now: MORNING,
+    });
+    await deliveryStarted;
+
+    // While the push is running, the sender cancels theirs (their own
+    // delivery already went out; the cancellation bars future pushes).
+    const { deliver: commandDeliver, calls } = makeDeliver();
+    await briefingUnsubscribe.handle(
+      makeMessage("Unsubscribe briefing"),
+      {},
+      commandDeliver,
+      app,
+    );
+    assert.match(calls[0].content, /Unsubscribed/);
+
+    finishDispatch();
+    assert.equal(await dispatch, 2);
+    const { subscriptions } = await loadSubscriptions(app);
+    assert.equal(
+      subscriptions[SOURCE_HEX],
+      undefined,
+      "the mid-flight unsubscribe is not resurrected by the dispatch write-back",
+    );
+    assert.equal(subscriptions[OTHER_HEX].lastSentDay, todayKey(MORNING));
+  } finally {
+    cleanup();
+  }
+});

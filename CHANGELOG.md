@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+### Fixed
+- **A briefing subscription created or cancelled while a daily push is running no longer gets silently erased.** The dispatch held its loaded copy of the subscription store across all LXMF deliveries — minutes over a slow mesh — and then wrote that older copy back, clobbering whatever the crew changed in the meantime: a `Subscribe briefing` message answered during the startup catch-up push (exactly when someone re-subscribes after a restart) was confirmed to the sender and then erased by the dispatch's write-back, so the push stopped reaching them, and an `Unsubscribe briefing` during a push could be resurrected with fresh send marks. The dispatch now re-reads the store before persisting its send marks — still-subscribed recipients get their marks on the fresh copy, recipients gone from it are skipped instead of resurrected — and the atomic-write staging file is per-writer, so a dispatch landing its marks while a command saves can no longer share one temporary file. Covered by `tests/brief-subscriptions.test.js`
 
 ## [0.9.2] - 2026-10-21
 ### Fixed

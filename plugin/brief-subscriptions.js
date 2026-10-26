@@ -25,7 +25,10 @@
  * (`brief-subscriptions.json`), written atomically. Deliberately plugin-data,
  * not plugin settings: the crew manage their subscriptions from the mesh, and
  * the plugin configuration belongs to the admin UI — a message-driven write
- * into the settings would clobber concurrent UI edits.
+ * into the settings would clobber concurrent UI edits. The crew's writes and
+ * the dispatch's send marks share that store; a dispatch re-reads it before
+ * persisting its marks, so a subscription created or removed while its
+ * deliveries were in flight survives the write-back.
  *
  * Dispatch resolves each stored subscription against the currently configured
  * crew (the same {@link module:plugin/notifications} resolution every command
@@ -114,7 +117,10 @@ async function loadSubscriptions(app) {
 
 /**
  * Persists the subscription store atomically (temporary file + rename), so a
- * crash mid-write can never leave a truncated store behind.
+ * crash mid-write can never leave a truncated store behind. The temporary
+ * file is per-writer (pid + write attempt), so concurrent writers — a
+ * dispatch landing its marks while a crew `Subscribe briefing` message is
+ * being answered — can never corrupt each other's staging file.
  *
  * @param {string} file - Store path from {@link loadSubscriptions}.
  * @param {object} subscriptions - The entries to persist.
@@ -122,7 +128,7 @@ async function loadSubscriptions(app) {
  */
 async function saveSubscriptions(file, subscriptions) {
   await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(
     tmp,
     `${JSON.stringify({ version: 1, subscriptions }, null, 2)}\n`,
@@ -238,20 +244,36 @@ async function dispatchBriefings({
   }
   const content = briefingMarkdown({ payload: briefing.payload, meta, now });
   let sent = 0;
+  const delivered = [];
   for (const hash of pending) {
     try {
       await deliver(hash, "Daily briefing", content, null, { markdown: true });
-      subscriptions[hash].lastSentDay = today;
-      subscriptions[hash].lastSentAt = now.toISOString();
-      subscriptions[hash].lastSentFetchedAt = briefing.fetchedAt;
+      delivered.push(hash);
       sent += 1;
     } catch (e) {
       log(`Daily briefing delivery to ${hash} failed: ${e.message}`);
     }
   }
   if (sent > 0) {
+    // The send marks land on a freshly loaded store, not on the copy this
+    // dispatch started from: deliveries can hold the older copy for minutes
+    // over the mesh, and writing it back would silently erase whatever the
+    // crew changed meanwhile — a `Subscribe briefing` sent while the push was
+    // running, or an `Unsubscribe briefing` (whose sender is then skipped
+    // here instead of being resurrected with marks for a push they cancelled).
     try {
-      await saveSubscriptions(file, subscriptions);
+      const fresh = await loadSubscriptions(app);
+      if (fresh.file) {
+        for (const hash of delivered) {
+          const entry = fresh.subscriptions[hash];
+          if (entry && typeof entry === "object") {
+            entry.lastSentDay = today;
+            entry.lastSentAt = now.toISOString();
+            entry.lastSentFetchedAt = briefing.fetchedAt;
+          }
+        }
+        await saveSubscriptions(fresh.file, fresh.subscriptions);
+      }
     } catch (e) {
       log(`Failed to persist briefing subscription state: ${e.message}`);
     }
