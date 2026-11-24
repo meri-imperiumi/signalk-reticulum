@@ -2,7 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { Reticulum, Identity } = require("@reticulum/core");
+const { disableReticulumStamps } = require("./helpers/reticulum-stamps.js");
 const { setupMessaging } = require("../plugin/messaging");
+
+disableReticulumStamps();
 
 /**
  * Smoketest that the lxmf.delivery announce advertises a forward-secrecy

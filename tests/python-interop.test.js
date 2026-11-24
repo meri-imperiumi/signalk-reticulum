@@ -8,6 +8,10 @@ const net = require("node:net");
 
 const { toHex } = require("@reticulum/core");
 const { LocalClientInterface } = require("@reticulum/node");
+const {
+  disableReticulumStamps,
+  TransportCore,
+} = require("./helpers/reticulum-stamps.js");
 
 const makePlugin = require("../plugin/index.js");
 
@@ -82,6 +86,21 @@ async function waitFor(predicate, timeoutMs, label, intervalMs = 250) {
   throw new Error(`Timed out after ${timeoutMs}ms waiting for ${label}`);
 }
 
+/**
+ * True when the Python RNS side understands RNS 1.6 network stamps
+ * (version >= 1.6.0).
+ *
+ * @param {string} versionLine - Stdout of the `print(RNS.__version__)` probe.
+ * @returns {boolean}
+ */
+function rnsSupportsStamps(versionLine) {
+  const match = (versionLine || "").match(/(\d+)\.(\d+)/);
+  if (!match) return false;
+  return (
+    Number(match[1]) > 1 || (Number(match[1]) === 1 && Number(match[2]) >= 6)
+  );
+}
+
 /** Minimal Signal K ServerAPI stand-in (see tests/plugin.test.js). */
 function makeApp(dataDir) {
   const app = {
@@ -150,9 +169,11 @@ test("crew delivery interop against a real Python rnsd and LXMF client", {
 }, async () => {
   // --- Self-skip without the Python side --------------------------------
   const python = process.env.PYTHON_INTEROP_PYTHON || "python3";
-  const probe = spawnSync(python, ["-c", "import RNS, LXMF"], {
-    encoding: "utf8",
-  });
+  const probe = spawnSync(
+    python,
+    ["-c", "import RNS, LXMF; print(RNS.__version__)"],
+    { encoding: "utf8" },
+  );
   const rnsdProbe = spawnSync("rnsd", ["--help"], { encoding: "utf8" });
   if (probe.status !== 0 || rnsdProbe.error) {
     console.log(
@@ -160,6 +181,27 @@ test("crew delivery interop against a real Python rnsd and LXMF client", {
         `(${python} import status: ${probe.status}, rnsd: ${rnsdProbe.error ? rnsdProbe.error.code : "present"})`,
     );
     return;
+  }
+
+  // RNS 1.6 network stamps: when the Python side speaks 1.6+, run the full
+  // stamped wire path — stamped announces, stamped path requests, stamped
+  // link requests — against the real Python reference, since that is what
+  // the boat runs. Mining targets are lowered on both sides to keep the
+  // interop run fast; the wire format is identical at any target. Against
+  // older Python RNS the stamp extension is unknown wire noise (LXMF's
+  // app_data parser does a bare `msgpack.unpackb` and raises ExtraData on
+  // the appended stamp bytes), so the JS side emits the pre-1.6 shape.
+  const pythonStamps = rnsSupportsStamps(probe.stdout);
+  console.log(
+    `Python RNS ${probe.stdout.trim()}: ` +
+      (pythonStamps
+        ? "1.6+ stamped wire path (mining targets lowered for speed)"
+        : "pre-1.6, stamps disabled"),
+  );
+  if (pythonStamps) {
+    TransportCore.DESTINATION_VALUE = 16;
+  } else {
+    disableReticulumStamps();
   }
 
   // --- Isolated environment ----------------------------------------------
@@ -175,41 +217,45 @@ test("crew delivery interop against a real Python rnsd and LXMF client", {
   const controlPort = await ephemeralPort();
   const meshPort = await ephemeralPort();
 
-  fs.writeFileSync(
-    path.join(rnsdConfigDir, "config"),
-    [
-      "[reticulum]",
-      "share_instance = Yes",
-      "shared_instance_type = tcp",
-      `shared_instance_port = ${sharedInstancePort}`,
-      `instance_control_port = ${controlPort}`,
-      "",
-      "[interfaces]",
-      "  [[TCP Server Interface]]",
-      "    type = TCPServerInterface",
-      "    enabled = Yes",
-      "    listen_ip = 127.0.0.1",
-      `    listen_port = ${meshPort}`,
-      "",
-    ].join("\n"),
-  );
+  const rnsdConfig = [
+    "[reticulum]",
+    "share_instance = Yes",
+    "shared_instance_type = tcp",
+    `shared_instance_port = ${sharedInstancePort}`,
+    `instance_control_port = ${controlPort}`,
+    "",
+    "[interfaces]",
+    "  [[TCP Server Interface]]",
+    "    type = TCPServerInterface",
+    "    enabled = Yes",
+    "    listen_ip = 127.0.0.1",
+    `    listen_port = ${meshPort}`,
+    "",
+  ];
+  if (pythonStamps) {
+    // Keep Python-side proof-of-work mining fast; on 1.5 this section is
+    // unknown and simply ignored (we only write it when the side is 1.6+).
+    rnsdConfig.push("[stamps]", "destination_value = 16.0", "");
+  }
+  fs.writeFileSync(path.join(rnsdConfigDir, "config"), rnsdConfig.join("\n"));
 
-  fs.writeFileSync(
-    path.join(crewConfigDir, "config"),
-    [
-      "[reticulum]",
-      "share_instance = No",
-      `instance_control_port = ${await ephemeralPort()}`,
-      "",
-      "[interfaces]",
-      "  [[TCP Interface]]",
-      "    type = TCPClientInterface",
-      "    enabled = Yes",
-      "    target_host = 127.0.0.1",
-      `    target_port = ${meshPort}`,
-      "",
-    ].join("\n"),
-  );
+  const crewConfig = [
+    "[reticulum]",
+    "share_instance = No",
+    `instance_control_port = ${await ephemeralPort()}`,
+    "",
+    "[interfaces]",
+    "  [[TCP Interface]]",
+    "    type = TCPClientInterface",
+    "    enabled = Yes",
+    "    target_host = 127.0.0.1",
+    `    target_port = ${meshPort}`,
+    "",
+  ];
+  if (pythonStamps) {
+    crewConfig.push("[stamps]", "destination_value = 16.0", "");
+  }
+  fs.writeFileSync(path.join(crewConfigDir, "config"), crewConfig.join("\n"));
 
   // --- Launch rnsd --------------------------------------------------------
   const rnsd = spawn("rnsd", ["--config", rnsdConfigDir], {

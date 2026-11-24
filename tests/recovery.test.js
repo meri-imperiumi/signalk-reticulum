@@ -261,6 +261,9 @@ const {
   PacketType,
 } = require("@reticulum/core/src/core/packet.js");
 const { LocalClientInterface } = require("@reticulum/node");
+const { disableReticulumStamps } = require("./helpers/reticulum-stamps.js");
+
+disableReticulumStamps();
 
 test("smoketest: frozen shared-instance client is recycled and transmits again", async () => {
   const connections = [];

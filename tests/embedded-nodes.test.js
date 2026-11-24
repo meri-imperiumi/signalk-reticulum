@@ -5,11 +5,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { Reticulum, Identity } = require("@reticulum/core");
+const { disableReticulumStamps } = require("./helpers/reticulum-stamps.js");
 const {
   deps,
   setupEmbeddedPropagationNode,
   setupEmbeddedRFedNode,
 } = require("../plugin/embedded-nodes");
+
+disableReticulumStamps();
 const {
   makeEmbeddedShipTelemetryPublisher,
   DEFAULT_CHANNEL,

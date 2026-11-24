@@ -20,6 +20,9 @@ const {
   HeaderType,
 } = require("@reticulum/core");
 const { LocalClientInterface } = require("@reticulum/node");
+const { disableReticulumStamps } = require("./helpers/reticulum-stamps.js");
+
+disableReticulumStamps();
 
 /** A fake interface class that records its lifecycle for assertions. */
 function makeFakeInterfaceClass(typeName, { connectThrows, ctorThrows } = {}) {

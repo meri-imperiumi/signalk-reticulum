@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { Reticulum, Identity, toHex } = require("@reticulum/core");
+const { disableReticulumStamps } = require("./helpers/reticulum-stamps.js");
 const { LXMRouter } = require("@reticulum/lxmf");
 const {
   deps,
@@ -10,6 +11,8 @@ const {
   syncFromNode,
   submitToEmbeddedNode,
 } = require("../plugin/propagation");
+
+disableReticulumStamps();
 
 const REAL_DEPS = { ...deps };
 

@@ -2,8 +2,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { Reticulum, Identity, toHex } = require("@reticulum/core");
+const { disableReticulumStamps } = require("./helpers/reticulum-stamps.js");
 const { setupMessaging, makeDeliverer } = require("../plugin/messaging");
 const commands = require("../plugin/commands");
+
+disableReticulumStamps();
 
 /**
  * Regression guard for the "no PROOF / no response" bug.

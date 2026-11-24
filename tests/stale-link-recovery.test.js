@@ -8,6 +8,9 @@ const {
   LinkTeardownReason,
 } = require("@reticulum/core/src/transport/link.js");
 const { setupMessaging } = require("../plugin/messaging");
+const { disableReticulumStamps } = require("./helpers/reticulum-stamps.js");
+
+disableReticulumStamps();
 
 /**
  * Real-integration regression smoketest for the "zombie link" failure mode

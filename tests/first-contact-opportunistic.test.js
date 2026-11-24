@@ -2,8 +2,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const { Reticulum, Identity, toHex } = require("@reticulum/core");
+const { disableReticulumStamps } = require("./helpers/reticulum-stamps.js");
 const { setupMessaging, makeDeliverer } = require("../plugin/messaging");
 const commands = require("../plugin/commands");
+
+disableReticulumStamps();
 
 /**
  * TRUE first-contact opportunistic: the client sends a ping WITHOUT having

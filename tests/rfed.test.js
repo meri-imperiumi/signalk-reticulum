@@ -10,6 +10,9 @@ const {
   NotifyRegistry,
 } = require("@reticulum/rfed");
 const rfed = require("../plugin/rfed");
+const { disableReticulumStamps } = require("./helpers/reticulum-stamps.js");
+
+disableReticulumStamps();
 const {
   SCHEMA_VERSION,
   DEFAULT_CHANNEL,
