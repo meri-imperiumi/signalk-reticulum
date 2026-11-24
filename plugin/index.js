@@ -108,6 +108,17 @@ const {
 } = require("./traffic");
 
 /**
+ * Default announce-stamp proof-of-work mining target (fractional 8.8
+ * fixed-point cost — the integer part is whole bits of work). Deliberately
+ * below reticulum-js's rollout default of 25.0 (≈ 2^25 ≈ 33.5M trials,
+ * minutes per destination on boat-class hardware, re-mined after every
+ * restart): 18.0 ≈ 260k trials ≈ ~1s per destination on the same hardware.
+ * Operators raise it via `stamps.destination_value` as hardware and mesh
+ * enforcement allow.
+ */
+const DEFAULT_STAMP_DESTINATION_VALUE = 18;
+
+/**
  * Overridable dependencies (the Reticulum orchestrator class, the interface
  * registry lookup, and the shared-instance connector factory). Defaults point
  * at the real @reticulum packages; tests swap these for fakes so the plugin
@@ -558,30 +569,35 @@ module.exports = (app) => {
       // by design (@reticulum parity with Python's [stamps] config-file
       // semantics), and the @reticulum Reticulum-constructor options can
       // only turn them ON — so the plugin owns the switch explicitly on
-      // every start. Default OFF: field evidence from lille-oe (2026-11-24)
-      // showed start() stalling for 30+ minutes with emission on even on
-      // reticulum-js 0.10.1's worker-thread mining path — most likely the
-      // fast stamper's worker silently falling back to synchronous mining
-      // on that host, freezing the event loop per destination, possibly
-      // compounded by the awaited announce chain re-mining every
-      // destination from scratch after each restart (reticulum-js does not
-      // persist mined stamps the way Python's lxmd persists them under
-      // storage/stamps/). The same host came up healthy the moment
-      // emission was disabled. Turn stamps.generation on deliberately, on
-      // hosts that can afford the mining, once reticulum-js persists
-      // stamps and logs the worker fallback. Enforcement stays off
-      // regardless, so unstamped traffic is accepted either way during
-      // the rollout.
-      const stampGeneration = !!(
-        config &&
-        config.stamps &&
-        config.stamps.generation
-      );
+      // every start. Default ON, but at a mining target the boat can
+      // afford: reticulum-js re-mines every destination's announce stamp
+      // inside the awaited announce chain on every restart, and the RNS
+      // 1.6.1 rollout target (value 25.0 ≈ 2^25 ≈ 33.5M trials, minutes
+      // per destination on boat-class hardware) stalled lille-oe's start()
+      // for 30+ minutes on 2026-11-24 — the plugin looked dead to the
+      // world while announces were still being ingested. The default
+      // target here is 18.0 (≈ 260k trials, ~1s per destination on the
+      // same hardware, ~0.1s on a fast host): still a real
+      // proof-of-work, comparable to the 15.8 path-request stamps the
+      // mesh already emits by default. The achieved value doubles as the
+      // destination's advertised link cost; a future mesh-wide
+      // enforcement phase with higher required values would eventually
+      // reject low stamps on strict interfaces, so operators can raise
+      // stamps.destination_value toward 25 as their hardware and the
+      // mesh allow. Enforcement itself stays off regardless, so
+      // unstamped traffic is accepted either way during the rollout.
+      const stampGeneration = config?.stamps?.generation !== false;
+      const configuredStampValue = Number(config?.stamps?.destination_value);
+      const stampValue =
+        Number.isFinite(configuredStampValue) && configuredStampValue >= 8
+          ? configuredStampValue
+          : DEFAULT_STAMP_DESTINATION_VALUE;
       deps.TransportCore.STAMP_DESTINATIONS = stampGeneration;
       deps.TransportCore.STAMP_PATH_REQUESTS = stampGeneration;
       deps.TransportCore.STAMP_LINK_REQUESTS = stampGeneration;
+      deps.TransportCore.DESTINATION_VALUE = stampValue;
       app.debug(
-        `RNS 1.6 stamp emission ${stampGeneration ? "enabled" : "disabled"}`,
+        `RNS 1.6 stamp emission ${stampGeneration ? "enabled" : "disabled"}, announce stamp target ${stampValue}`,
       );
 
       // Install the fast `node:crypto` stamp engine (@reticulum 0.9.9, work

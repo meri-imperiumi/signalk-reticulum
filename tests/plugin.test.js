@@ -737,7 +737,7 @@ test("start installs the fast node stamper and stop leaves the worker running", 
   }
 });
 
-test("stamp emission follows the stamps.generation config (default off)", async () => {
+test("stamp emission follows the stamps config (default on, target 18)", async () => {
   const app = makeApp();
   const plugin = makePlugin(app);
   const { TransportCore } = makePlugin.deps;
@@ -745,37 +745,60 @@ test("stamp emission follows the stamps.generation config (default off)", async 
     destinations: TransportCore.STAMP_DESTINATIONS,
     pathRequests: TransportCore.STAMP_PATH_REQUESTS,
     linkRequests: TransportCore.STAMP_LINK_REQUESTS,
+    destinationValue: TransportCore.DESTINATION_VALUE,
   };
-  // Start from the opposite of the plugin default to prove start() owns the
-  // knobs regardless of what the process-global statics were before.
-  TransportCore.STAMP_DESTINATIONS = true;
-  TransportCore.STAMP_PATH_REQUESTS = true;
-  TransportCore.STAMP_LINK_REQUESTS = true;
+  // Start from the opposite of the plugin defaults to prove start() owns
+  // the knobs regardless of what the process-global statics were before.
+  TransportCore.STAMP_DESTINATIONS = false;
+  TransportCore.STAMP_PATH_REQUESTS = false;
+  TransportCore.STAMP_LINK_REQUESTS = false;
+  TransportCore.DESTINATION_VALUE = 25;
 
   try {
     await plugin.start({});
     assert.equal(
       TransportCore.STAMP_DESTINATIONS,
-      false,
-      "announce stamp emission off by default: field evidence showed startup stalling for 30+ minutes with emission on",
-    );
-    assert.equal(TransportCore.STAMP_PATH_REQUESTS, false);
-    assert.equal(TransportCore.STAMP_LINK_REQUESTS, false);
-
-    await plugin.stop();
-    await plugin.start({ stamps: { generation: true } });
-    assert.equal(
-      TransportCore.STAMP_DESTINATIONS,
       true,
-      "stamps.generation enables announce stamp emission",
+      "stamp emission on by default, at a boat-sized mining target",
     );
     assert.equal(TransportCore.STAMP_PATH_REQUESTS, true);
     assert.equal(TransportCore.STAMP_LINK_REQUESTS, true);
+    assert.equal(
+      TransportCore.DESTINATION_VALUE,
+      18,
+      "default announce stamp target is 18 (~1s per destination on boat hardware), not the rollout 25 that stalled lille-oe",
+    );
+
+    await plugin.stop();
+    await plugin.start({
+      stamps: { generation: false, destination_value: 22 },
+    });
+    assert.equal(
+      TransportCore.STAMP_DESTINATIONS,
+      false,
+      "stamps.generation = false emits the pre-1.6 unstamped wire shape",
+    );
+    assert.equal(TransportCore.STAMP_PATH_REQUESTS, false);
+    assert.equal(TransportCore.STAMP_LINK_REQUESTS, false);
+    assert.equal(
+      TransportCore.DESTINATION_VALUE,
+      22,
+      "destination_value override reaches the transport knob",
+    );
+    await plugin.stop();
+
+    await plugin.start({ stamps: { destination_value: "nonsense" } });
+    assert.equal(
+      TransportCore.DESTINATION_VALUE,
+      18,
+      "invalid destination_value falls back to the 18 default",
+    );
     await plugin.stop();
   } finally {
     TransportCore.STAMP_DESTINATIONS = saved.destinations;
     TransportCore.STAMP_PATH_REQUESTS = saved.pathRequests;
     TransportCore.STAMP_LINK_REQUESTS = saved.linkRequests;
+    TransportCore.DESTINATION_VALUE = saved.destinationValue;
   }
 });
 

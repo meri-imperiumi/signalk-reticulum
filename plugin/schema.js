@@ -215,14 +215,11 @@ function buildPluginSchema(interfaces) {
           "path requests, stamped link requests). Stamp *enforcement* stays " +
           "off everywhere during the rollout, so unstamped traffic from this " +
           "node and its peers is accepted either way. Mining runs in the " +
-          "fast node:crypto stamper's worker thread where available, but " +
-          "reticulum-js re-mines every destination from scratch after each " +
-          "restart and cannot persist mined stamps yet, and a broken worker " +
-          "silently falls back to mining on the server's main thread — so " +
-          "on low-power hosts this can stall startup for a long time. Keep " +
-          "it off on boats unless you have verified your host handles it; " +
-          "also note pre-1.6 peers reject the appended stamp extension " +
-          "inside announce app_data entirely.",
+          "fast node:crypto stamper's worker thread where available; note " +
+          "reticulum-js re-mines each destination's stamp after every " +
+          "restart, so the mining target matters on slow hosts. Also note " +
+          "pre-1.6 peers reject the appended stamp extension inside " +
+          "announce app_data entirely.",
         properties: {
           generation: {
             type: "boolean",
@@ -230,15 +227,33 @@ function buildPluginSchema(interfaces) {
             description:
               "Carry proof-of-work stamps on announces, path requests and " +
               "link requests, matching the RNS 1.6.1 reference's rollout " +
-              "phase. Opt-in: the first announce of each destination mines " +
-              "its stamp (tens of seconds on fast hosts, minutes on slow " +
-              "ones, re-mined after every restart), so verify your host " +
-              "copes before enabling — check the " +
-              "communication.reticulum.stamps.* status paths for mining " +
-              "progress. Turn off when a peer runs pre-1.6 software that " +
-              "rejects the stamp extension inside announce app_data. " +
-              "Changing this restarts the plugin.",
-            default: false,
+              "phase. On by default at a mining target sized for boat " +
+              "hardware — check the " +
+              "communication.reticulum.stamps.* status paths to see mining " +
+              "progress after a restart. Turn off when a peer runs pre-1.6 " +
+              "software that rejects the stamp extension inside announce " +
+              "app_data. Changing this restarts the plugin.",
+            default: true,
+          },
+          destination_value: {
+            type: "number",
+            title: "Announce stamp mining target",
+            description:
+              "Proof-of-work target mined for each destination's announce " +
+              "stamp (fractional cost: the integer part is bits of work, so " +
+              "each +1 doubles mining time). Default 18.0 ≈ 260k trials ≈ " +
+              "~1s per destination on boat-class hardware; the RNS 1.6.1 " +
+              "rollout target of 25.0 ≈ 33.5M trials takes minutes per " +
+              "destination there and stalls startup on slow hosts. The " +
+              "achieved value doubles as the destination's advertised link " +
+              "cost; a future mesh-wide enforcement phase with higher " +
+              "required values would eventually reject stamps below its " +
+              "bar, so raise this toward 25 as your hardware and the mesh " +
+              "allow. Changing this restarts the plugin.",
+            default: 18,
+            minimum: 8,
+            maximum: 25.5,
+            step: 0.5,
           },
         },
         additionalProperties: false,
