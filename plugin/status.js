@@ -100,7 +100,7 @@ function getInterfaceStats(iface) {
  *   configured or auto-discovered *external* LXMF propagation node this
  *   plugin uses as a store-and-forward client (null when none/unknown);
  *   only surfaced when no embedded propagation node is running
- * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], interfacesFailed: object[], links: number, destinationsKnown: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, resourcesOutgoing: number, resourcesIncoming: number, pendingRequests: number, pendingLinkProofs: number, splitResources: number, failedSplitResources: number, heapUsedBytes: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
+ * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], interfacesFailed: object[], links: number, destinationsKnown: number, stampsGeneration: boolean, stampsDestinationValue: number|null, destinationsOwned: number, destinationsStamped: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, resourcesOutgoing: number, resourcesIncoming: number, pendingRequests: number, pendingLinkProofs: number, splitResources: number, failedSplitResources: number, heapUsedBytes: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
  */
 async function getStatus(
   rns,
@@ -190,6 +190,27 @@ async function getStatus(
     destinationsKnown = rns.transport.routingTable.routes.size;
   }
 
+  // RNS 1.6 proof-of-work stamp state. The knobs are process-global
+  // TransportCore statics (the plugin owns them per start()), and each of
+  // the node's own destinations mines its announce stamp one-shot inside
+  // the awaited announce() — `destinationsStamped` lagging
+  // `destinationsOwned` after a restart is exactly the "announces still
+  // mining" signal (minutes per destination at the 25.0 rollout target on
+  // slow hardware; a worker-less fast-stamper fallback freezes the whole
+  // event loop per destination instead).
+  const stampsGeneration =
+    rns?.transport?.constructor?.STAMP_DESTINATIONS === true;
+  const stampsDestinationValue =
+    rns?.transport?.constructor?.DESTINATION_VALUE ?? null;
+  let destinationsOwned = 0;
+  let destinationsStamped = 0;
+  if (rns?.transport?.localDestinations) {
+    for (const dest of rns.transport.localDestinations.values()) {
+      destinationsOwned += 1;
+      if (dest?._stamp != null) destinationsStamped += 1;
+    }
+  }
+
   // Check embedded nodes
   const embeddedPropagationRunning = !!_lxmf?.propagationNode;
   const embeddedRfedRunning = !!_embeddedRfed;
@@ -239,6 +260,10 @@ async function getStatus(
     })),
     links,
     destinationsKnown,
+    stampsGeneration,
+    stampsDestinationValue,
+    destinationsOwned,
+    destinationsStamped,
     interfacesConnected,
     bytesReceived,
     bytesTransmitted,
@@ -329,6 +354,22 @@ async function formatStatusValues(
     {
       path: "communication.reticulum.destinationsKnown",
       value: status.destinationsKnown,
+    },
+    {
+      path: "communication.reticulum.stamps.generation",
+      value: status.stampsGeneration,
+    },
+    {
+      path: "communication.reticulum.stamps.destinationValue",
+      value: status.stampsDestinationValue,
+    },
+    {
+      path: "communication.reticulum.stamps.destinationsOwned",
+      value: status.destinationsOwned,
+    },
+    {
+      path: "communication.reticulum.stamps.destinationsStamped",
+      value: status.destinationsStamped,
     },
     {
       path: "communication.reticulum.resourcesOutgoing",
@@ -558,6 +599,40 @@ function getStatusMetadata() {
         displayName: "Destinations known",
         description:
           "Number of remote destinations in the routing table (peers reachable via announces)",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.stamps.generation",
+      value: {
+        displayName: "RNS 1.6 stamp emission",
+        description:
+          "Whether this node carries RNS 1.6 proof-of-work stamps on its announces, path requests and link requests (the stamps.generation config switch)",
+      },
+    },
+    {
+      path: "communication.reticulum.stamps.destinationValue",
+      value: {
+        displayName: "Announce stamp target value",
+        description:
+          "Proof-of-work target the node mines its announce stamps against (fractional 8.8 fixed-point cost; the RNS 1.6.1 rollout default is 25.0). Mining takes seconds per destination on fast hardware, minutes on slow ones",
+      },
+    },
+    {
+      path: "communication.reticulum.stamps.destinationsOwned",
+      value: {
+        displayName: "Own destinations",
+        description:
+          "Number of this node's own registered destinations that carries an announce",
+        units: "count",
+      },
+    },
+    {
+      path: "communication.reticulum.stamps.destinationsStamped",
+      value: {
+        displayName: "Destinations with a mined stamp",
+        description:
+          "Own destinations holding their one-shot announce proof-of-work stamp. Lagging destinationsOwned right after a restart means announces are still queuing on mining; stuck at zero with stamp emission on means announce stamp mining never completes (check for a wedged stamper worker falling back to synchronous mining)",
         units: "count",
       },
     },

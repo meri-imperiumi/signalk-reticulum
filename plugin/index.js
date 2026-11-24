@@ -558,20 +558,24 @@ module.exports = (app) => {
       // by design (@reticulum parity with Python's [stamps] config-file
       // semantics), and the @reticulum Reticulum-constructor options can
       // only turn them ON — so the plugin owns the switch explicitly on
-      // every start. Default ON since reticulum-js 0.10.1: the fast
-      // node:crypto stamper mines announce stamps in its worker thread
-      // (measured ~22 s wall per destination at the 25.0 rollout target
-      // with the Signal K event loop completely free), matching the RNS
-      // 1.6.1 reference's rollout phase. The one reason to set
-      // stamps.generation = false is a mesh with pre-1.6 peers: their LXMF
-      // announce parser does a bare msgpack.unpackb on app_data and
-      // rejects the appended stamp extension (verified against Python
-      // RNS 1.5.4). Enforcement stays off regardless, so unstamped traffic
-      // is accepted either way during the rollout.
-      const stampGeneration = !(
+      // every start. Default OFF: field evidence from lille-oe (2026-11-24)
+      // showed start() stalling for 30+ minutes with emission on even on
+      // reticulum-js 0.10.1's worker-thread mining path — most likely the
+      // fast stamper's worker silently falling back to synchronous mining
+      // on that host, freezing the event loop per destination, possibly
+      // compounded by the awaited announce chain re-mining every
+      // destination from scratch after each restart (reticulum-js does not
+      // persist mined stamps the way Python's lxmd persists them under
+      // storage/stamps/). The same host came up healthy the moment
+      // emission was disabled. Turn stamps.generation on deliberately, on
+      // hosts that can afford the mining, once reticulum-js persists
+      // stamps and logs the worker fallback. Enforcement stays off
+      // regardless, so unstamped traffic is accepted either way during
+      // the rollout.
+      const stampGeneration = !!(
         config &&
         config.stamps &&
-        config.stamps.generation === false
+        config.stamps.generation
       );
       deps.TransportCore.STAMP_DESTINATIONS = stampGeneration;
       deps.TransportCore.STAMP_PATH_REQUESTS = stampGeneration;
@@ -651,6 +655,79 @@ module.exports = (app) => {
         const rns = new deps.Reticulum(rnsOptions(config, storageAdapter));
         plugin.rns = rns;
         app.debug(`Loaded Reticulum identity ${hashHex}`);
+
+        // Status reporting inputs populated by later startup phases; the
+        // declarations live here so the status publisher below can be wired
+        // BEFORE those phases run — a stalled phase (e.g. announce stamp
+        // mining on slow hardware) must not take status observability down
+        // with it.
+        let propagationNodeHex = null;
+        let displayName;
+        let pluginHealth = null;
+
+        // Publish Reticulum status metadata on startup, then periodically
+        // (every 60 seconds): interface status, link counts, destination
+        // table size, stamp-mining progress and LXMF peer count. Wired this
+        // early deliberately — the 2026-11-24 lille-oe incident had start()
+        // parked for 30+ minutes inside the awaited announce chain before
+        // this wiring ever ran, leaving the plugin invisible in Signal K
+        // (default "Started" status, no communication.reticulum.* deltas)
+        // while announces were still being ingested. publishStatus reads
+        // live state, so values simply fill in as later phases complete.
+        const statusMetadata = getStatusMetadata();
+        app.handleMessage("signalk-reticulum", {
+          updates: [
+            {
+              meta: statusMetadata,
+            },
+          ],
+        });
+
+        const statusIntervalMs = 60000;
+        const publishStatus = async () => {
+          try {
+            if (typeof pluginHealth?.updateFromWatchdog === "function") {
+              pluginHealth.updateFromWatchdog();
+            }
+            app.debug(
+              `publishStatus: embeddedPropagation=${!!plugin.embeddedPropagation}, embeddedRfed=${!!plugin.embeddedRfed}`,
+            );
+            const values = await formatStatusValues(
+              rns,
+              plugin.lxmf,
+              plugin.nomadnet,
+              plugin.rfed,
+              plugin.embeddedPropagation,
+              plugin.embeddedRfed,
+              plugin.identity,
+              displayName,
+              pluginHealth,
+              propagationNodeHex,
+            );
+            app.handleMessage("signalk-reticulum", {
+              context: "vessels.self",
+              updates: [
+                {
+                  source: {
+                    label: "signalk-reticulum",
+                    src: hashHex,
+                  },
+                  timestamp: new Date().toISOString(),
+                  values,
+                },
+              ],
+            });
+          } catch (e) {
+            app.debug(`Status publish error: ${e.message}`);
+          }
+        };
+        // Publish shortly after start, then on the recurring timer.
+        const initialStatus = setTimeout(publishStatus, 5000);
+        const statusTimer = setInterval(publishStatus, statusIntervalMs);
+        unsubscribes.push(() => {
+          clearTimeout(initialStatus);
+          clearInterval(statusTimer);
+        });
 
         // Wire bzip2 as the Reticulum compressionProvider so compressed
         // inbound/outbound Resources work (SPEC §10.2). Best-effort: a WASM
@@ -896,17 +973,19 @@ module.exports = (app) => {
          * the embedded node is used instead, in which case the status layer
          * derives the hash from the router). Surfaced periodically as the
          * `communication.reticulum.lxmfPropagationNode` delta so an operator
-         * can see which node messages are being stored at.
+         * can see which node messages are being stored at. The variable is
+         * declared near the status publisher (which reads it every tick) and
+         * assigned here and when an external node is wired.
          */
-        let propagationNodeHex = null;
         /** Timeout-bounded wrapper around {@link deliverTelemetry}. */
         let timedDeliverTelemetry;
         /**
          * Display name the LXMF delivery destination announces as. Captured
          * here so the connectivity-change trigger can re-announce with the
-         * same name instead of resolving it a second time.
+         * same name instead of resolving it a second time. Declared near the
+         * status publisher (which reads it every tick) and resolved here so
+         * the announce carries the same name.
          */
-        let displayName;
         try {
           displayName = resolveDisplayName({
             configured:
@@ -1370,7 +1449,7 @@ module.exports = (app) => {
 
         // Host-load health, kept live by the recovery layer below and
         // surfaced through the periodic status publish.
-        const pluginHealth = {
+        pluginHealth = {
           /** Latest event-loop lag sample, ms (0 until the first sample). */
           eventLoopLagMs: 0,
           /** Completed interface recycles this run. */
@@ -1453,65 +1532,6 @@ module.exports = (app) => {
             app.debug(`Metered-state subscription error: ${e.message}`);
           }
         }
-
-        // Publish Reticulum status metadata on startup.
-        const statusMetadata = getStatusMetadata();
-        app.handleMessage("signalk-reticulum", {
-          updates: [
-            {
-              meta: statusMetadata,
-            },
-          ],
-        });
-
-        // Periodically publish Reticulum status (every 60 seconds). This
-        // includes interface status, link counts, destination table size,
-        // and LXMF peer count.
-        const statusIntervalMs = 60000;
-        const publishStatus = async () => {
-          try {
-            if (typeof pluginHealth.updateFromWatchdog === "function") {
-              pluginHealth.updateFromWatchdog();
-            }
-            app.debug(
-              `publishStatus: embeddedPropagation=${!!plugin.embeddedPropagation}, embeddedRfed=${!!plugin.embeddedRfed}`,
-            );
-            const values = await formatStatusValues(
-              rns,
-              plugin.lxmf,
-              plugin.nomadnet,
-              plugin.rfed,
-              plugin.embeddedPropagation,
-              plugin.embeddedRfed,
-              plugin.identity,
-              displayName,
-              pluginHealth,
-              propagationNodeHex,
-            );
-            app.handleMessage("signalk-reticulum", {
-              context: "vessels.self",
-              updates: [
-                {
-                  source: {
-                    label: "signalk-reticulum",
-                    src: hashHex,
-                  },
-                  timestamp: new Date().toISOString(),
-                  values,
-                },
-              ],
-            });
-          } catch (e) {
-            app.debug(`Status publish error: ${e.message}`);
-          }
-        };
-        // Publish shortly after start, then on the recurring timer.
-        const initialStatus = setTimeout(publishStatus, 5000);
-        const statusTimer = setInterval(publishStatus, statusIntervalMs);
-        unsubscribes.push(() => {
-          clearTimeout(initialStatus);
-          clearInterval(statusTimer);
-        });
 
         // --- LXMF store-and-forward (propagation-node client) --------------
         // The node acts as a *client* of an external LXMF propagation node:

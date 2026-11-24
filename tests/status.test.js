@@ -734,3 +734,104 @@ test("status publishes per-link registry sizes and process heap for leak observa
     assert.ok(metaPaths.includes(path), `metadata for ${path} missing`);
   }
 });
+
+test("formatStatusValues reports stamp generation state and mining progress", async () => {
+  const {
+    Reticulum,
+    Identity,
+    Destination,
+    DestType,
+  } = require("@reticulum/core");
+  const {
+    disableReticulumStamps,
+    TransportCore,
+  } = require("./helpers/reticulum-stamps.js");
+  const { LocalClientInterface } = require("@reticulum/node");
+
+  // Start from a known state: emission off, then flip on for this test.
+  disableReticulumStamps();
+  const saved = {
+    destinations: TransportCore.STAMP_DESTINATIONS,
+    destinationValue: TransportCore.DESTINATION_VALUE,
+  };
+
+  const rns = new Reticulum({ storageAdapter: null, logLevel: "error" });
+  const iface = {
+    name: "recorder",
+    online: true,
+    bitrate: 62500,
+    _packetWriter: { write: () => Promise.resolve() },
+    async connect() {},
+    async disconnect() {},
+    addEventListener() {},
+  };
+  rns.transport.addInterface(iface, true);
+  rns.transport.defaultInterface = iface;
+
+  try {
+    // Emission off: generation false even with an own destination present.
+    const identity = await Identity.generate();
+    const dest = await Destination.create(
+      "lxmf",
+      "delivery",
+      DestType.SINGLE,
+      identity,
+      rns,
+    );
+    rns.registerDestination(dest);
+    let values = await formatStatusValues(rns, null, null, null);
+    const byPath = Object.fromEntries(values.map((v) => [v.path, v.value]));
+    assert.equal(
+      byPath["communication.reticulum.stamps.generation"],
+      false,
+      "stamp emission off reflects in status",
+    );
+    assert.equal(
+      byPath["communication.reticulum.stamps.destinationsOwned"],
+      1,
+      "the own destination is counted",
+    );
+    assert.equal(
+      byPath["communication.reticulum.stamps.destinationsStamped"],
+      0,
+      "no stamp mined while emission is off",
+    );
+
+    // Emission on with a cheap mining target: announce mines the one-shot
+    // stamp and status must show the progress (owned == stamped).
+    TransportCore.STAMP_DESTINATIONS = true;
+    TransportCore.DESTINATION_VALUE = 12;
+    await dest.announce();
+    values = await formatStatusValues(rns, null, null, null);
+    const stamped = Object.fromEntries(values.map((v) => [v.path, v.value]));
+    assert.equal(
+      stamped["communication.reticulum.stamps.generation"],
+      true,
+      "stamp emission on reflects in status",
+    );
+    assert.equal(
+      stamped["communication.reticulum.stamps.destinationValue"],
+      12,
+      "the active mining target is surfaced",
+    );
+    assert.equal(
+      stamped["communication.reticulum.stamps.destinationsStamped"],
+      stamped["communication.reticulum.stamps.destinationsOwned"],
+      "mined stamp count catches up with own destinations after announce",
+    );
+
+    const metaPaths = getStatusMetadata().map((m) => m.path);
+    for (const path of [
+      "communication.reticulum.stamps.generation",
+      "communication.reticulum.stamps.destinationValue",
+      "communication.reticulum.stamps.destinationsOwned",
+      "communication.reticulum.stamps.destinationsStamped",
+    ]) {
+      assert.ok(metaPaths.includes(path), `metadata for ${path} missing`);
+    }
+  } finally {
+    TransportCore.STAMP_DESTINATIONS = saved.destinations;
+    TransportCore.DESTINATION_VALUE = saved.destinationValue;
+    await rns.close?.();
+  }
+});
