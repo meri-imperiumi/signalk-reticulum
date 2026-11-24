@@ -87,6 +87,29 @@ async function waitFor(predicate, timeoutMs, label, intervalMs = 250) {
 }
 
 /**
+ * Terminates a subprocess and waits for it to actually exit before the
+ * caller removes the work tree. A bare `kill()` sends SIGTERM and returns
+ * while the daemon is still running: rnsd keeps flushing its path table and
+ * the crew client its identity file, and a recursive rm racing those writes
+ * fails with ENOTEMPTY (seen on CI). Escalates to SIGKILL if the process
+ * ignores TERM for the grace period.
+ */
+async function stopProc(proc, graceMs = 5000) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  const exited = new Promise((resolve) => proc.once("exit", resolve));
+  proc.kill();
+  const timer = setTimeout(() => {
+    try {
+      proc.kill("SIGKILL");
+    } catch {
+      /* already dead */
+    }
+  }, graceMs);
+  await exited;
+  clearTimeout(timer);
+}
+
+/**
  * True when the Python RNS side understands RNS 1.6 network stamps
  * (version >= 1.6.0).
  *
@@ -407,9 +430,14 @@ test("crew delivery interop against a real Python rnsd and LXMF client", {
     } catch {
       /* best effort */
     }
-    crew.kill();
-    rnsd.kill();
-    fs.rmSync(workDir, { recursive: true, force: true });
+    await stopProc(crew);
+    await stopProc(rnsd);
+    fs.rmSync(workDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
     if (rnsdErr.trim()) {
       console.log("rnsd stderr tail:", rnsdErr.slice(-500));
     }
