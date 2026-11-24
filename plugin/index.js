@@ -557,16 +557,21 @@ module.exports = (app) => {
       // RNS 1.6 proof-of-work stamp emission. The knobs are process-global
       // by design (@reticulum parity with Python's [stamps] config-file
       // semantics), and the @reticulum Reticulum-constructor options can
-      // only turn them ON — 0.10.0 ships them defaulted ON — so the plugin
-      // owns the switch explicitly on every start. Default OFF while
-      // upstream mines announce stamps on the host's main thread (minutes
-      // of frozen event loop per destination at the rollout target value;
-      // tracked in reticulum-js). Enforcement stays off regardless, so
-      // unstamped traffic is accepted either way during the rollout.
-      const stampGeneration = !!(
+      // only turn them ON — so the plugin owns the switch explicitly on
+      // every start. Default ON since reticulum-js 0.10.1: the fast
+      // node:crypto stamper mines announce stamps in its worker thread
+      // (measured ~22 s wall per destination at the 25.0 rollout target
+      // with the Signal K event loop completely free), matching the RNS
+      // 1.6.1 reference's rollout phase. The one reason to set
+      // stamps.generation = false is a mesh with pre-1.6 peers: their LXMF
+      // announce parser does a bare msgpack.unpackb on app_data and
+      // rejects the appended stamp extension (verified against Python
+      // RNS 1.5.4). Enforcement stays off regardless, so unstamped traffic
+      // is accepted either way during the rollout.
+      const stampGeneration = !(
         config &&
         config.stamps &&
-        config.stamps.generation
+        config.stamps.generation === false
       );
       deps.TransportCore.STAMP_DESTINATIONS = stampGeneration;
       deps.TransportCore.STAMP_PATH_REQUESTS = stampGeneration;

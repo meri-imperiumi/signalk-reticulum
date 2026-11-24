@@ -214,13 +214,11 @@ function buildPluginSchema(interfaces) {
           '"Enabled stamp generation" rollout: stamped announces, stamped ' +
           "path requests, stamped link requests). Stamp *enforcement* stays " +
           "off everywhere during the rollout, so unstamped traffic from this " +
-          "node and its peers is accepted either way. Leave this off for now: " +
-          "announce stamp mining currently runs on the Signal K server's main " +
-          "thread inside @reticulum/core (upstream reticulum-js limitation, " +
-          "minutes of frozen event loop per destination at the rollout " +
-          "target), and enabling it can stall the whole server on start. " +
-          "Flip it on only once your reticulum-js version mines in its " +
-          "worker thread.",
+          "node and its peers is accepted either way. Mining runs in the " +
+          "fast node:crypto stamper's worker thread, so enabling it never " +
+          "stalls the server; the only reason to turn it off is a mesh with " +
+          "pre-1.6 peers, whose LXMF announce parser rejects the appended " +
+          "stamp extension.",
         properties: {
           generation: {
             type: "boolean",
@@ -228,11 +226,13 @@ function buildPluginSchema(interfaces) {
             description:
               "Carry proof-of-work stamps on announces, path requests and " +
               "link requests, matching the RNS 1.6.1 reference's rollout " +
-              "phase. Default off while the upstream reticulum-js mining " +
-              "runs on the host's main thread; peers accept unstamped " +
-              "traffic either way during the rollout. Changing this " +
-              "restarts the plugin.",
-            default: false,
+              "phase. Mining happens in the stamper's worker thread " +
+              "(reticulum-js 0.10.1), so the first announce of each new " +
+              "destination takes tens of seconds to propagate but never " +
+              "blocks the server. Turn off only when a peer runs pre-1.6 " +
+              "software that rejects the stamp extension inside announce " +
+              "app_data. Changing this restarts the plugin.",
+            default: true,
           },
         },
         additionalProperties: false,

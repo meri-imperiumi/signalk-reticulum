@@ -737,7 +737,7 @@ test("start installs the fast node stamper and stop leaves the worker running", 
   }
 });
 
-test("stamp emission follows the stamps.generation config (default off)", async () => {
+test("stamp emission follows the stamps.generation config (default on)", async () => {
   const app = makeApp();
   const plugin = makePlugin(app);
   const { TransportCore } = makePlugin.deps;
@@ -746,30 +746,31 @@ test("stamp emission follows the stamps.generation config (default off)", async 
     pathRequests: TransportCore.STAMP_PATH_REQUESTS,
     linkRequests: TransportCore.STAMP_LINK_REQUESTS,
   };
-  // Simulate the 0.10.0 process-global defaults (all emission on).
-  TransportCore.STAMP_DESTINATIONS = true;
-  TransportCore.STAMP_PATH_REQUESTS = true;
-  TransportCore.STAMP_LINK_REQUESTS = true;
+  // Start from the opposite of the plugin default to prove start() owns the
+  // knobs regardless of what the process-global statics were before.
+  TransportCore.STAMP_DESTINATIONS = false;
+  TransportCore.STAMP_PATH_REQUESTS = false;
+  TransportCore.STAMP_LINK_REQUESTS = false;
 
   try {
     await plugin.start({});
     assert.equal(
       TransportCore.STAMP_DESTINATIONS,
-      false,
-      "announce stamp emission off by default: upstream mines announces on the host's main thread",
-    );
-    assert.equal(TransportCore.STAMP_PATH_REQUESTS, false);
-    assert.equal(TransportCore.STAMP_LINK_REQUESTS, false);
-
-    await plugin.stop();
-    await plugin.start({ stamps: { generation: true } });
-    assert.equal(
-      TransportCore.STAMP_DESTINATIONS,
       true,
-      "stamps.generation enables announce stamp emission",
+      "announce stamp emission on by default: reticulum-js 0.10.1 mines in the stamper worker thread",
     );
     assert.equal(TransportCore.STAMP_PATH_REQUESTS, true);
     assert.equal(TransportCore.STAMP_LINK_REQUESTS, true);
+
+    await plugin.stop();
+    await plugin.start({ stamps: { generation: false } });
+    assert.equal(
+      TransportCore.STAMP_DESTINATIONS,
+      false,
+      "stamps.generation = false restores the pre-1.6 unstamped wire shape",
+    );
+    assert.equal(TransportCore.STAMP_PATH_REQUESTS, false);
+    assert.equal(TransportCore.STAMP_LINK_REQUESTS, false);
     await plugin.stop();
   } finally {
     TransportCore.STAMP_DESTINATIONS = saved.destinations;
