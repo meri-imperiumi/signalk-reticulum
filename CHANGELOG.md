@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.10.1] - 2026-11-24
 ### Changed
 - **Proof-of-work stamps are emitted by default now.** The opt-in-era caveat is gone: reticulum-js 0.10.1 dispatches announce stamp mining through the fast `node:crypto` stamper's worker thread (measured ~22 s of wall time per destination at the 25.0 rollout target with the Signal K event loop completely free), so the `stamps.generation` toggle's default flips to on and the plugin matches the RNS 1.6.1 reference's "Enabled stamp generation" rollout phase from the first start — announces, path requests and link requests carry proof-of-work stamps without ever blocking the server; the first announce of each new destination merely takes tens of seconds to propagate while the mining runs off-thread. The switch remains for one case: meshes with pre-1.6 peers, whose LXMF announce parser does a bare `msgpack.unpackb` on announce app_data and rejects the appended stamp extension (verified against Python RNS 1.5.4) — setting `stamps.generation = false` restores the pre-1.6 unstamped wire shape. Stamp enforcement stays off everywhere, so unstamped traffic is accepted either way during the rollout. Covered by `tests/plugin.test.js`
 
