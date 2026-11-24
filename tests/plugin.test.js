@@ -737,7 +737,7 @@ test("start installs the fast node stamper and stop leaves the worker running", 
   }
 });
 
-test("stamp emission follows the stamps config (default on, target 18)", async () => {
+test("stamp emission and enforcement follow the stamps config", async () => {
   const app = makeApp();
   const plugin = makePlugin(app);
   const { TransportCore } = makePlugin.deps;
@@ -746,6 +746,9 @@ test("stamp emission follows the stamps config (default on, target 18)", async (
     pathRequests: TransportCore.STAMP_PATH_REQUESTS,
     linkRequests: TransportCore.STAMP_LINK_REQUESTS,
     destinationValue: TransportCore.DESTINATION_VALUE,
+    enforced: TransportCore.STAMPS_ENFORCED,
+    lrEnforced: TransportCore.LR_STAMPS_ENFORCED,
+    destinationCost: TransportCore.DESTINATION_COST,
   };
   // Start from the opposite of the plugin defaults to prove start() owns
   // the knobs regardless of what the process-global statics were before.
@@ -753,6 +756,9 @@ test("stamp emission follows the stamps config (default on, target 18)", async (
   TransportCore.STAMP_PATH_REQUESTS = false;
   TransportCore.STAMP_LINK_REQUESTS = false;
   TransportCore.DESTINATION_VALUE = 25;
+  TransportCore.STAMPS_ENFORCED = true;
+  TransportCore.LR_STAMPS_ENFORCED = true;
+  TransportCore.DESTINATION_COST = 23.5;
 
   try {
     await plugin.start({});
@@ -768,10 +774,26 @@ test("stamp emission follows the stamps config (default on, target 18)", async (
       18,
       "default announce stamp target is 18 (~1s per destination on boat hardware), not the rollout 25 that stalled lille-oe",
     );
+    assert.equal(
+      TransportCore.STAMPS_ENFORCED,
+      false,
+      "enforcement off by default: it rejects every pre-1.6 peer outright",
+    );
+    assert.equal(TransportCore.LR_STAMPS_ENFORCED, false);
+    assert.equal(
+      TransportCore.DESTINATION_COST,
+      18,
+      "required announce value defaults alongside the emission target",
+    );
 
     await plugin.stop();
     await plugin.start({
-      stamps: { generation: false, destination_value: 22 },
+      stamps: {
+        generation: false,
+        destination_value: 22,
+        enforce: true,
+        required_value: 23.5,
+      },
     });
     assert.equal(
       TransportCore.STAMP_DESTINATIONS,
@@ -785,6 +807,35 @@ test("stamp emission follows the stamps config (default on, target 18)", async (
       22,
       "destination_value override reaches the transport knob",
     );
+    assert.equal(
+      TransportCore.STAMPS_ENFORCED,
+      true,
+      "stamps.enforce turns on announce and path request enforcement",
+    );
+    assert.equal(
+      TransportCore.LR_STAMPS_ENFORCED,
+      true,
+      "stamps.enforce turns on link request enforcement",
+    );
+    assert.equal(
+      TransportCore.DESTINATION_COST,
+      23.5,
+      "required_value override reaches the transport knob",
+    );
+
+    // Interfaces registered while enforcement is on carry the required
+    // value, so the validator reads it live instead of its frozen 23.5
+    // default (reticulum-js 0.10.1 never reads the DESTINATION_COST static
+    // on the announce path).
+    const added = plugin.rns && plugin.rns.added ? plugin.rns.added : [];
+    assert.ok(added.length >= 1, "at least one interface was registered");
+    for (const { iface } of added) {
+      assert.equal(
+        iface.destinationCost,
+        23.5,
+        `interface ${iface.name || "?"} carries the required stamp value`,
+      );
+    }
     await plugin.stop();
 
     await plugin.start({ stamps: { destination_value: "nonsense" } });
@@ -799,6 +850,9 @@ test("stamp emission follows the stamps config (default on, target 18)", async (
     TransportCore.STAMP_PATH_REQUESTS = saved.pathRequests;
     TransportCore.STAMP_LINK_REQUESTS = saved.linkRequests;
     TransportCore.DESTINATION_VALUE = saved.destinationValue;
+    TransportCore.STAMPS_ENFORCED = saved.enforced;
+    TransportCore.LR_STAMPS_ENFORCED = saved.lrEnforced;
+    TransportCore.DESTINATION_COST = saved.destinationCost;
   }
 });
 

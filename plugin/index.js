@@ -596,8 +596,35 @@ module.exports = (app) => {
       deps.TransportCore.STAMP_PATH_REQUESTS = stampGeneration;
       deps.TransportCore.STAMP_LINK_REQUESTS = stampGeneration;
       deps.TransportCore.DESTINATION_VALUE = stampValue;
+
+      // Stamp *enforcement* (receive side): reject announces and path
+      // requests that carry no stamp or one below the required value, and
+      // link requests whose keystamp falls below the destination's
+      // advertised cost. Off by default — the RNS 1.6.1 reference keeps
+      // enforcement off during the rollout, and enabling it rejects every
+      // pre-1.6 peer outright (their announces, link requests and path
+      // requests carry no stamps at all), which on a mixed-version mesh
+      // means blackholing NomadNet/Sideband installs. The required announce
+      // value defaults to the same 18 the node emits, so an enforcing node
+      // is self-consistent; the reference's own default is 23.5. Link
+      // requests are checked against each destination's advertised link
+      // cost (our emission target), path requests against the reference's
+      // 15.8 PR cost. reticulum-js 0.10.1's transport-level
+      // DESTINATION_COST static is never read on the announce path (the
+      // validator falls back to a frozen 23.5 constant when the receiving
+      // interface carries no value), so the required value is stamped onto
+      // every interface at registration below.
+      const stampsEnforce = config?.stamps?.enforce === true;
+      const configuredRequiredValue = Number(config?.stamps?.required_value);
+      const stampRequiredValue =
+        Number.isFinite(configuredRequiredValue) && configuredRequiredValue >= 8
+          ? configuredRequiredValue
+          : DEFAULT_STAMP_DESTINATION_VALUE;
+      deps.TransportCore.STAMPS_ENFORCED = stampsEnforce;
+      deps.TransportCore.LR_STAMPS_ENFORCED = stampsEnforce;
+      deps.TransportCore.DESTINATION_COST = stampRequiredValue;
       app.debug(
-        `RNS 1.6 stamp emission ${stampGeneration ? "enabled" : "disabled"}, announce stamp target ${stampValue}`,
+        `RNS 1.6 stamp enforcement ${stampsEnforce ? "enabled" : "disabled"}, required announce value ${stampRequiredValue}`,
       );
 
       // Install the fast `node:crypto` stamp engine (@reticulum 0.9.9, work
@@ -670,6 +697,24 @@ module.exports = (app) => {
         );
         const rns = new deps.Reticulum(rnsOptions(config, storageAdapter));
         plugin.rns = rns;
+
+        // Apply the required announce stamp value to every interface the
+        // transport registers, present and future (interface rebuilds go
+        // through addInterface too), so enforcement reads a live per-
+        // interface value instead of the validator's frozen 23.5 default
+        // (reticulum-js 0.10.1's DESTINATION_COST static is never read on
+        // the announce path). Done at the Reticulum-instance level, where
+        // every registration path (setupInterfaces, shared instance,
+        // replacement factories) funnels through.
+        if (typeof rns.addInterface === "function") {
+          const originalAddInterface = rns.addInterface.bind(rns);
+          rns.addInterface = (iface, isDefault) => {
+            if (iface && typeof iface === "object") {
+              iface.destinationCost = stampRequiredValue;
+            }
+            return originalAddInterface(iface, isDefault);
+          };
+        }
         app.debug(`Loaded Reticulum identity ${hashHex}`);
 
         // Status reporting inputs populated by later startup phases; the
@@ -789,6 +834,13 @@ module.exports = (app) => {
             }
             const shared = await connect({});
             if (shared) {
+              // The embedded RFed node runs its own Reticulum instance, so
+              // it needs the required stamp value on its interface too
+              // (the enforcement statics are process-global and already
+              // cover it).
+              if (typeof stampRequiredValue === "number") {
+                shared.destinationCost = stampRequiredValue;
+              }
               rnsNode.addInterface(shared, true);
               return shared;
             }

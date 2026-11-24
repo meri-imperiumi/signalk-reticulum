@@ -748,12 +748,18 @@ test("formatStatusValues reports stamp generation state and mining progress", as
   } = require("./helpers/reticulum-stamps.js");
   const { LocalClientInterface } = require("@reticulum/node");
 
-  // Start from a known state: emission off, then flip on for this test.
-  disableReticulumStamps();
+  // Start from a known state: emission and enforcement off, defaults
+  // captured first so the finally block can restore whatever the process
+  // had before this test ran.
   const saved = {
     destinations: TransportCore.STAMP_DESTINATIONS,
     destinationValue: TransportCore.DESTINATION_VALUE,
+    enforced: TransportCore.STAMPS_ENFORCED,
+    destinationCost: TransportCore.DESTINATION_COST,
   };
+  disableReticulumStamps();
+  TransportCore.STAMPS_ENFORCED = false;
+  TransportCore.DESTINATION_COST = 18;
 
   const rns = new Reticulum({ storageAdapter: null, logLevel: "error" });
   const iface = {
@@ -787,6 +793,16 @@ test("formatStatusValues reports stamp generation state and mining progress", as
       "stamp emission off reflects in status",
     );
     assert.equal(
+      byPath["communication.reticulum.stamps.enforce"],
+      false,
+      "enforcement off reflects in status",
+    );
+    assert.equal(
+      byPath["communication.reticulum.stamps.requiredValue"],
+      18,
+      "the default required announce value reflects in status",
+    );
+    assert.equal(
       byPath["communication.reticulum.stamps.destinationsOwned"],
       1,
       "the own destination is counted",
@@ -801,6 +817,8 @@ test("formatStatusValues reports stamp generation state and mining progress", as
     // stamp and status must show the progress (owned == stamped).
     TransportCore.STAMP_DESTINATIONS = true;
     TransportCore.DESTINATION_VALUE = 12;
+    TransportCore.STAMPS_ENFORCED = true;
+    TransportCore.DESTINATION_COST = 12;
     await dest.announce();
     values = await formatStatusValues(rns, null, null, null);
     const stamped = Object.fromEntries(values.map((v) => [v.path, v.value]));
@@ -813,6 +831,16 @@ test("formatStatusValues reports stamp generation state and mining progress", as
       stamped["communication.reticulum.stamps.destinationValue"],
       12,
       "the active mining target is surfaced",
+    );
+    assert.equal(
+      stamped["communication.reticulum.stamps.enforce"],
+      true,
+      "flipping the enforcement static reflects in status",
+    );
+    assert.equal(
+      stamped["communication.reticulum.stamps.requiredValue"],
+      12,
+      "the required announce value follows the mining target static",
     );
     assert.equal(
       stamped["communication.reticulum.stamps.destinationsStamped"],
@@ -832,6 +860,8 @@ test("formatStatusValues reports stamp generation state and mining progress", as
   } finally {
     TransportCore.STAMP_DESTINATIONS = saved.destinations;
     TransportCore.DESTINATION_VALUE = saved.destinationValue;
+    TransportCore.STAMPS_ENFORCED = saved.enforced;
+    TransportCore.DESTINATION_COST = saved.destinationCost;
     await rns.close?.();
   }
 });

@@ -100,7 +100,7 @@ function getInterfaceStats(iface) {
  *   configured or auto-discovered *external* LXMF propagation node this
  *   plugin uses as a store-and-forward client (null when none/unknown);
  *   only surfaced when no embedded propagation node is running
- * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], interfacesFailed: object[], links: number, destinationsKnown: number, stampsGeneration: boolean, stampsDestinationValue: number|null, destinationsOwned: number, destinationsStamped: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, resourcesOutgoing: number, resourcesIncoming: number, pendingRequests: number, pendingLinkProofs: number, splitResources: number, failedSplitResources: number, heapUsedBytes: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
+ * @returns {Promise<{identityHash: string, displayName: string, interfaces: object[], interfacesFailed: object[], links: number, destinationsKnown: number, stampsGeneration: boolean, stampsDestinationValue: number|null, stampsEnforce: boolean, stampsRequiredValue: number|null, destinationsOwned: number, destinationsStamped: number, interfacesConnected: number, bytesReceived: number, bytesTransmitted: number, resourcesOutgoing: number, resourcesIncoming: number, pendingRequests: number, pendingLinkProofs: number, splitResources: number, failedSplitResources: number, heapUsedBytes: number, lxmfPropagationNode: string|null, rfedNode: string|null, embeddedPropagationRunning: boolean, lxmfPropagationStored: number, embeddedRfedRunning: boolean, rfedBlobsStored: number, rfedSubscriptions: number}>}
  */
 async function getStatus(
   rns,
@@ -202,6 +202,9 @@ async function getStatus(
     rns?.transport?.constructor?.STAMP_DESTINATIONS === true;
   const stampsDestinationValue =
     rns?.transport?.constructor?.DESTINATION_VALUE ?? null;
+  const stampsEnforce = rns?.transport?.constructor?.STAMPS_ENFORCED === true;
+  const stampsRequiredValue =
+    rns?.transport?.constructor?.DESTINATION_COST ?? null;
   let destinationsOwned = 0;
   let destinationsStamped = 0;
   if (rns?.transport?.localDestinations) {
@@ -262,6 +265,8 @@ async function getStatus(
     destinationsKnown,
     stampsGeneration,
     stampsDestinationValue,
+    stampsEnforce,
+    stampsRequiredValue,
     destinationsOwned,
     destinationsStamped,
     interfacesConnected,
@@ -362,6 +367,14 @@ async function formatStatusValues(
     {
       path: "communication.reticulum.stamps.destinationValue",
       value: status.stampsDestinationValue,
+    },
+    {
+      path: "communication.reticulum.stamps.enforce",
+      value: status.stampsEnforce,
+    },
+    {
+      path: "communication.reticulum.stamps.requiredValue",
+      value: status.stampsRequiredValue,
     },
     {
       path: "communication.reticulum.stamps.destinationsOwned",
@@ -616,6 +629,22 @@ function getStatusMetadata() {
         displayName: "Announce stamp target value",
         description:
           "Proof-of-work target the node mines its announce stamps against (fractional 8.8 fixed-point cost; the RNS 1.6.1 rollout default is 25.0). Mining takes seconds per destination on fast hardware, minutes on slow ones",
+      },
+    },
+    {
+      path: "communication.reticulum.stamps.enforce",
+      value: {
+        displayName: "Enforce stamps on received traffic",
+        description:
+          "Whether announces and path requests without a sufficient stamp are rejected, and link requests below the destination's advertised cost are refused. Off during the RNS rollout: enforcement rejects every pre-1.6 peer outright",
+      },
+    },
+    {
+      path: "communication.reticulum.stamps.requiredValue",
+      value: {
+        displayName: "Required announce stamp value",
+        description:
+          "Minimum announce stamp value accepted when enforcement is on. Link requests are checked against each destination's advertised cost, path requests against the reference's 15.8 PR cost",
       },
     },
     {

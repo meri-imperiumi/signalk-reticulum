@@ -255,6 +255,38 @@ function buildPluginSchema(interfaces) {
             maximum: 25.5,
             step: 0.5,
           },
+          enforce: {
+            type: "boolean",
+            title: "Enforce stamps on received traffic",
+            description:
+              "Reject announces and path requests that carry no stamp or " +
+              "one below the required value, and link requests whose " +
+              "keystamp falls below the destination's advertised cost. " +
+              "OFF by default — the RNS 1.6.1 reference keeps enforcement " +
+              "off during the rollout, and enabling it rejects every " +
+              "pre-1.6 peer outright (their announces, link requests and " +
+              "path requests carry no stamps at all), blackholing " +
+              "NomadNet/Sideband installs on a mixed-version mesh. Enable " +
+              "only once the peers you care about all run stamp-capable " +
+              "software. Changing this restarts the plugin.",
+            default: false,
+          },
+          required_value: {
+            type: "number",
+            title: "Required announce stamp value",
+            description:
+              "Minimum announce stamp value accepted when enforcement is " +
+              "on (path requests are checked against the reference's 15.8 " +
+              "PR cost; link requests against each destination's advertised " +
+              "cost). Default 18.0 matches this node's own emission target, " +
+              "so an enforcing node is self-consistent; the RNS reference " +
+              "default is 23.5. Keep it at or below what your regular " +
+              "peers actually emit. Changing this restarts the plugin.",
+            default: 18,
+            minimum: 8,
+            maximum: 25.5,
+            step: 0.5,
+          },
         },
         additionalProperties: false,
       },
