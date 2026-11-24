@@ -987,6 +987,7 @@ const ADVANCED_GROUPS = [
   "nomadnet",
   "telemetry",
   "rfed",
+  "stamps",
   "appearance",
   "embedded_nodes",
 ];
