@@ -1,5 +1,7 @@
 # Changelog
 ## [Unreleased]
+
+## [0.10.0] - 2026-11-24
 ### Added
 - **Stamp emission is a plugin config choice (`stamps.generation`), off by default for now.** 0.10.0 ships RNS 1.6 proof-of-work stamp emission defaulted on — but announce stamp mining currently runs on the host's main thread inside @reticulum/core (the `Destination.ensureStamp` search never dispatches to the stamper engine's worker), a measured continuous multi-minute event-loop freeze per announced destination that timed out the Signal K plugin CI lifecycle check on every platform and would stall a real boat's server on plugin start. The new `stamps.generation` toggle (RNS 1.6 proof-of-work stamps config group) owns the three process-global emission knobs explicitly on every start — the @reticulum constructor options can only turn them on, so the plugin also uses it to force them off — flipping all three (announces, path requests, link requests) to match the rollout's stamped wire shape when enabled. Enforcement stays off everywhere, so unstamped traffic is accepted either way during the rollout; leave the toggle off until reticulum-js mines announce stamps in its worker thread. `tests/python-interop.test.js` opts in via the config on RNS 1.6+ Pythons so the stamped wire path stays exercised. Covered by `tests/plugin.test.js`
 ### Changed
