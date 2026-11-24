@@ -709,7 +709,7 @@ test("start keeps running without a compression provider when bzip2 init fails",
   }
 });
 
-test("start installs the fast node stamper and stop releases it", async () => {
+test("start installs the fast node stamper and stop leaves the worker running", async () => {
   const app = makeApp();
   const plugin = makePlugin(app);
   const calls = { install: 0, stop: 0 };
@@ -726,10 +726,55 @@ test("start installs the fast node stamper and stop releases it", async () => {
     await plugin.start({});
     assert.equal(calls.install, 1, "fast stamper installed on start");
     await plugin.stop();
-    assert.equal(calls.stop, 1, "fast stamper released on stop");
+    assert.equal(
+      calls.stop,
+      0,
+      "stamper worker not terminated on stop: killing it mid-mining makes an in-flight stamped announce fall back to minutes of synchronous mining on the host event loop",
+    );
   } finally {
     makePlugin.deps.useNodeStamper = realUse;
     makePlugin.deps.stopNodeStamper = realStop;
+  }
+});
+
+test("stamp emission follows the stamps.generation config (default off)", async () => {
+  const app = makeApp();
+  const plugin = makePlugin(app);
+  const { TransportCore } = makePlugin.deps;
+  const saved = {
+    destinations: TransportCore.STAMP_DESTINATIONS,
+    pathRequests: TransportCore.STAMP_PATH_REQUESTS,
+    linkRequests: TransportCore.STAMP_LINK_REQUESTS,
+  };
+  // Simulate the 0.10.0 process-global defaults (all emission on).
+  TransportCore.STAMP_DESTINATIONS = true;
+  TransportCore.STAMP_PATH_REQUESTS = true;
+  TransportCore.STAMP_LINK_REQUESTS = true;
+
+  try {
+    await plugin.start({});
+    assert.equal(
+      TransportCore.STAMP_DESTINATIONS,
+      false,
+      "announce stamp emission off by default: upstream mines announces on the host's main thread",
+    );
+    assert.equal(TransportCore.STAMP_PATH_REQUESTS, false);
+    assert.equal(TransportCore.STAMP_LINK_REQUESTS, false);
+
+    await plugin.stop();
+    await plugin.start({ stamps: { generation: true } });
+    assert.equal(
+      TransportCore.STAMP_DESTINATIONS,
+      true,
+      "stamps.generation enables announce stamp emission",
+    );
+    assert.equal(TransportCore.STAMP_PATH_REQUESTS, true);
+    assert.equal(TransportCore.STAMP_LINK_REQUESTS, true);
+    await plugin.stop();
+  } finally {
+    TransportCore.STAMP_DESTINATIONS = saved.destinations;
+    TransportCore.STAMP_PATH_REQUESTS = saved.pathRequests;
+    TransportCore.STAMP_LINK_REQUESTS = saved.linkRequests;
   }
 });
 

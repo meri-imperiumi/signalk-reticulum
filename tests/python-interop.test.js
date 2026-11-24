@@ -348,6 +348,11 @@ test("crew delivery interop against a real Python rnsd and LXMF client", {
   try {
     plugin = makePlugin(app);
     await plugin.start({
+      // On 1.6+ this test exists to exercise the stamped wire path: opt the
+      // plugin's stamp emission back in (the plugin config defaults it off
+      // while upstream mines announce stamps on the main thread). The mining
+      // target itself is lowered via TransportCore.DESTINATION_VALUE above.
+      stamps: { generation: pythonStamps },
       messaging: {
         send_alerts: true,
         digital_switching: false,

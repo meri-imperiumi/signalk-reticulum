@@ -205,6 +205,38 @@ function buildPluginSchema(interfaces) {
         },
         additionalProperties: false,
       },
+      stamps: {
+        type: "object",
+        title: "RNS 1.6 proof-of-work stamps",
+        description:
+          "Emission of RNS 1.6 network proof-of-work stamps (the wire " +
+          "shapes the RNS 1.6.1 reference emits during its current " +
+          '"Enabled stamp generation" rollout: stamped announces, stamped ' +
+          "path requests, stamped link requests). Stamp *enforcement* stays " +
+          "off everywhere during the rollout, so unstamped traffic from this " +
+          "node and its peers is accepted either way. Leave this off for now: " +
+          "announce stamp mining currently runs on the Signal K server's main " +
+          "thread inside @reticulum/core (upstream reticulum-js limitation, " +
+          "minutes of frozen event loop per destination at the rollout " +
+          "target), and enabling it can stall the whole server on start. " +
+          "Flip it on only once your reticulum-js version mines in its " +
+          "worker thread.",
+        properties: {
+          generation: {
+            type: "boolean",
+            title: "Emit proof-of-work stamps",
+            description:
+              "Carry proof-of-work stamps on announces, path requests and " +
+              "link requests, matching the RNS 1.6.1 reference's rollout " +
+              "phase. Default off while the upstream reticulum-js mining " +
+              "runs on the host's main thread; peers accept unstamped " +
+              "traffic either way during the rollout. Changing this " +
+              "restarts the plugin.",
+            default: false,
+          },
+        },
+        additionalProperties: false,
+      },
       traffic_limits: {
         type: "object",
         title: "Traffic limits",

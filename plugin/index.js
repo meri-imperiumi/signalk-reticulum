@@ -5,6 +5,7 @@
  * @returns {import("@signalk/server-api").Plugin}
  */
 const { Reticulum, toHex, fromHex } = require("@reticulum/core");
+const { TransportCore } = require("@reticulum/core/src/transport/transport.js");
 const { LXMessage } = require("@reticulum/lxmf");
 const {
   getInterface,
@@ -114,6 +115,8 @@ const {
  */
 const deps = {
   Reticulum,
+  /** RNS 1.6 stamp emission knobs (process-global, [stamps] config parity). */
+  TransportCore,
   getInterface,
   connectSharedInstance: LocalClientInterface.connectToSharedInstance,
   createStorageAdapter,
@@ -551,6 +554,27 @@ module.exports = (app) => {
       plugin.nomadnet = undefined;
       plugin.rfed = undefined;
 
+      // RNS 1.6 proof-of-work stamp emission. The knobs are process-global
+      // by design (@reticulum parity with Python's [stamps] config-file
+      // semantics), and the @reticulum Reticulum-constructor options can
+      // only turn them ON — 0.10.0 ships them defaulted ON — so the plugin
+      // owns the switch explicitly on every start. Default OFF while
+      // upstream mines announce stamps on the host's main thread (minutes
+      // of frozen event loop per destination at the rollout target value;
+      // tracked in reticulum-js). Enforcement stays off regardless, so
+      // unstamped traffic is accepted either way during the rollout.
+      const stampGeneration = !!(
+        config &&
+        config.stamps &&
+        config.stamps.generation
+      );
+      deps.TransportCore.STAMP_DESTINATIONS = stampGeneration;
+      deps.TransportCore.STAMP_PATH_REQUESTS = stampGeneration;
+      deps.TransportCore.STAMP_LINK_REQUESTS = stampGeneration;
+      app.debug(
+        `RNS 1.6 stamp emission ${stampGeneration ? "enabled" : "disabled"}`,
+      );
+
       // Install the fast `node:crypto` stamp engine (@reticulum 0.9.9, work
       // doc #45) before any LXMF/rfed node boots. The swap is process-global
       // in @reticulum/core, so one install covers outbound LXMF stamp
@@ -560,9 +584,7 @@ module.exports = (app) => {
       // nodes. The engine runs workblock builds and stamp generation in a
       // worker thread, so stamping never blocks the Signal K event loop.
       // Best-effort: a failure here leaves the byte-identical WebCrypto
-      // default in place rather than failing plugin start. The cleanup runs
-      // on stop (also covering config-change restarts, where the engine is
-      // simply re-installed by the next start).
+      // default in place rather than failing plugin start.
       try {
         deps.useNodeStamper();
         app.debug(
@@ -573,7 +595,16 @@ module.exports = (app) => {
           `Fast stamper install failed, keeping WebCrypto default: ${e.message}`,
         );
       }
-      unsubscribes.push(() => deps.stopNodeStamper());
+      // The stamp engine is deliberately NOT released on stop():
+      // stopNodeStamper() terminates the engine's worker, and an announce()
+      // still mining its proof-of-work stamp when that happens silently
+      // falls back to the synchronous engine on the calling thread — minutes
+      // of target-25.0 hashing that froze the host's event loop (seen as the
+      // Signal K plugin CI lifecycle check timing out on every platform, and
+      // it would hang the real server on a config-change restart the same
+      // way). The engine is process-global and its worker is reused by the
+      // next start(), so an idle worker across stop/start cycles costs
+      // nothing but one parked thread.
 
       let resolved;
       try {
